@@ -40,6 +40,22 @@ class Boid {
 
   }
 
+  separation(boids) {
+    let finalVec = new Vector2();
+
+    for (const boid of boids) {
+      let diff = Vector2.sub(this.position, boid.position);
+      let len = diff.length();
+      diff.norm();
+      diff.mul(1/ len * 5 ); 
+
+      finalVec.add(diff);
+    }
+
+    return finalVec;
+
+  }
+
 
   stayInBounds() {
     if (this.position.x < 0) {
@@ -61,6 +77,7 @@ class Boid {
 
     this.velocity.add(this.align(boids));
     this.velocity.add(this.cohesion(boids));
+    this.velocity.add(this.separation(boids));
     this.position.add(this.velocity);
 
     this.stayInBounds();
