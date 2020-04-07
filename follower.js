@@ -24,12 +24,12 @@ class Follower {
 
     ctx.translate(this.p.x, this.p.y);
     const angleRad = Math.atan2(this.v.y, this.v.x);
-    ctx.rotate(angleRad + (Math.PI / 2))
+    ctx.rotate(angleRad)
 
     ctx.beginPath();
-    ctx.moveTo(-5, 5);
-    ctx.lineTo(0, -15);
-    ctx.lineTo(5, 5);
+    ctx.moveTo(15, 0);
+    ctx.lineTo(-5, -5);
+    ctx.lineTo(-5, 5);
     ctx.closePath();
     ctx.fill();
 

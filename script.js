@@ -9,19 +9,44 @@ const colorArray = [
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
-let mouse = undefined;
+// let mouse = undefined;
 
-canvas.addEventListener('mousemove',
-  (event) => {
-    mouse = new Vector2(event.x, event.y);
-  })
+// canvas.addEventListener('mousemove',
+//   (event) => {
+//     mouse = new Vector2(event.x, event.y);
+//   })
 
 const width = canvas.scrollWidth;
 const height = canvas.scrollHeight;
 
-const fs = [];
-for (let i = 0; i < 1000; i++) {
-  fs.push(new Follower(colorArray[i % 5], new Vector2(Math.random() * width, Math.random() * height), Math.random() * 2));
+const radius = 100;
+
+const boids = [];
+// for (let i = 0; i < 1000; i++) {
+//   fs.push(new Follower(colorArray[i % 5], new Vector2(Math.random() * width, Math.random() * height), Math.random() * 2));
+// }
+
+
+for (let i = 0; i < 100; i++) {
+  boids.push(new Boid(width, height, colorArray[i % 5]));
+}
+
+function updateASingleBoid(boid) {
+  //
+  // get the list of all the nearby boids and store in nearBoids
+  const nearBoids = [];
+
+  for (const b of boids) {
+    if (b !== boid) {
+      let dist = Vector2.dist(b.position, boid.position);
+      if (dist < radius) {
+        nearBoids.push(b);
+      }
+    }
+  }
+
+  boid.update(nearBoids);
+  boid.draw(ctx);
 }
 
 function animate() {
@@ -29,9 +54,8 @@ function animate() {
 
   ctx.clearRect(0, 0, width, height);
 
-  for (const f of fs) {
-    f.update(mouse);
-    f.draw(ctx);
+  for (const boid of boids) {
+    updateASingleBoid(boid);
   }
 }
 animate()

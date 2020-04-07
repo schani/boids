@@ -115,4 +115,9 @@ class Vector2 {
   static dist(v1, v2) {
     return Vector2.sub(v1, v2).length();
   }
+
+  static norm(v) {
+    return Vector2.div(v, v.length());
+  }
+
 }
