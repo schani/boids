@@ -19,6 +19,8 @@ class Boid {
     this.velocity.mul(10);
     // this.acceleration = acceleration;
     this.color = color;
+
+    this.targetVelocity = MAX_VELOCITY * Math.random();
   }
 
 
@@ -62,9 +64,7 @@ class Boid {
     }
 
     return finalVec;
-
   }
-
 
   stayInBounds() {
     if (this.position.x < 0) {
@@ -81,7 +81,7 @@ class Boid {
   }
 
   update(boids) {
-    const diff = (MAX_VELOCITY - this.velocity.length());
+    const diff = (this.targetVelocity - this.velocity.length());
     this.velocity.add(Vector2.norm(this.velocity).mul(diff * 0.2));
 
     this.velocity.add(this.align(boids));
