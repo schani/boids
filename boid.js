@@ -23,7 +23,21 @@ class Boid {
     steer.div(boids.length);
     
     let align = steer.sub(this.velocity);
-    return align.div(4);
+    return Vector2.norm(align).div(4);
+  }
+
+  cohesion(boids) {
+  let steer = new Vector2(0,0);
+
+    for (const boid of boids) {
+      steer.add(boid.position);
+    }
+
+    steer.div(boids.length);
+    
+    let cohesion = steer.sub(this.position);
+    return Vector2.norm(cohesion).div(4);
+
   }
 
 
@@ -46,6 +60,7 @@ class Boid {
     this.velocity.add(Vector2.norm(this.velocity).mul(diff * 0.2));
 
     this.velocity.add(this.align(boids));
+    this.velocity.add(this.cohesion(boids));
     this.position.add(this.velocity);
 
     this.stayInBounds();
