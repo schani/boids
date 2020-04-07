@@ -1,5 +1,14 @@
 const MAX_VELOCITY = 7;
 
+let mouse = undefined;
+
+const c = document.getElementById('canvas');
+c.addEventListener('mousemove',
+  (event) => {
+    mouse = { position: new Vector2(event.x, event.y) };
+  })
+
+
 class Boid {
   constructor(width, height, color) {
     this.width = width;
@@ -14,40 +23,40 @@ class Boid {
 
 
   align(boids) {
-    let steer = new Vector2(0,0);
+    let steer = new Vector2(0, 0);
 
     for (const boid of boids) {
       steer.add(boid.velocity);
     }
 
     steer.div(boids.length);
-    
+
     let align = steer.sub(this.velocity);
     return Vector2.norm(align).div(4);
   }
 
   cohesion(boids) {
-  let steer = new Vector2(0,0);
+    let steer = new Vector2(0, 0);
 
     for (const boid of boids) {
       steer.add(boid.position);
     }
 
     steer.div(boids.length);
-    
+
     let cohesion = steer.sub(this.position);
     return Vector2.norm(cohesion).div(4);
 
   }
 
-  separation(boids) {
+  separation(boids, separationFactor) {
     let finalVec = new Vector2();
 
     for (const boid of boids) {
       let diff = Vector2.sub(this.position, boid.position);
       let len = diff.length();
       diff.norm();
-      diff.mul(1/ len * 5 ); 
+      diff.mul(1 / len * separationFactor);
 
       finalVec.add(diff);
     }
@@ -77,7 +86,12 @@ class Boid {
 
     this.velocity.add(this.align(boids));
     this.velocity.add(this.cohesion(boids));
-    this.velocity.add(this.separation(boids));
+    this.velocity.add(this.separation(boids, 3));
+
+    if (mouse !== undefined) {
+      this.velocity.add(this.separation([mouse], 70));
+    }
+
     this.position.add(this.velocity);
 
     this.stayInBounds();

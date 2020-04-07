@@ -9,13 +9,6 @@ const colorArray = [
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
-// let mouse = undefined;
-
-// canvas.addEventListener('mousemove',
-//   (event) => {
-//     mouse = new Vector2(event.x, event.y);
-//   })
-
 const width = canvas.scrollWidth;
 const height = canvas.scrollHeight;
 
@@ -27,7 +20,7 @@ const boids = [];
 // }
 
 
-for (let i = 0; i < 100; i++) {
+for (let i = 0; i < 300; i++) {
   boids.push(new Boid(width, height, colorArray[i % 5]));
 }
 
