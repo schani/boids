@@ -13,6 +13,7 @@ const width = canvas.scrollWidth;
 const height = canvas.scrollHeight;
 
 const radius = 100;
+const scale = 5;
 
 const boids = [];
 // for (let i = 0; i < 1000; i++) {
@@ -21,7 +22,7 @@ const boids = [];
 
 
 for (let i = 0; i < 300; i++) {
-  boids.push(new Boid(width, height, colorArray[i % 5]));
+  boids.push(new Boid(width * scale, height * scale, colorArray[i % 5]));
 }
 
 function updateASingleBoid(boid) {
@@ -45,10 +46,22 @@ function updateASingleBoid(boid) {
 function animate() {
   requestAnimationFrame(animate)
 
+  ctx.save();
   ctx.clearRect(0, 0, width, height);
+  ctx.scale(1 / scale, 1 / scale);
+
+  let sum = new Vector2(0, 0);
 
   for (const boid of boids) {
     updateASingleBoid(boid);
+
+    sum.add(boid.position);
   }
+
+  sum.div(boids.length);
+  ctx.fillStyle = "#ff0000";
+  ctx.fillRect(sum.x - 30, sum.y - 30, 60, 60);
+
+  ctx.restore();
 }
 animate()

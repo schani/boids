@@ -5,7 +5,7 @@ let mouse = undefined;
 const c = document.getElementById('canvas');
 c.addEventListener('mousemove',
   (event) => {
-    mouse = { position: new Vector2(event.x, event.y) };
+    mouse = { position: new Vector2(event.x * 5, event.y * 5) };
   })
 
 
@@ -26,9 +26,15 @@ class Boid {
 
   align(boids) {
     let steer = new Vector2(0, 0);
+    let doSteer = false;
 
     for (const boid of boids) {
       steer.add(boid.velocity);
+      doSteer = true;
+    }
+
+    if (!doSteer) {
+      return new Vector2(0, 0);
     }
 
     steer.div(boids.length);
@@ -39,9 +45,17 @@ class Boid {
 
   cohesion(boids) {
     let steer = new Vector2(0, 0);
+    let doSteer = false;
 
     for (const boid of boids) {
-      steer.add(boid.position);
+      // if (this.color === boid.color) {
+        steer.add(boid.position);
+        doSteer = true;
+      // }
+    }
+
+    if (!doSteer) {
+      return new Vector2(0, 0);
     }
 
     steer.div(boids.length);
@@ -85,6 +99,7 @@ class Boid {
     this.velocity.add(Vector2.norm(this.velocity).mul(diff * 0.2));
 
     this.velocity.add(this.align(boids));
+
     this.velocity.add(this.cohesion(boids));
     this.velocity.add(this.separation(boids, 3));
 
@@ -106,9 +121,9 @@ class Boid {
     ctx.rotate(angleRad)
 
     ctx.beginPath();
-    ctx.moveTo(15, 0);
-    ctx.lineTo(-5, -5);
-    ctx.lineTo(-5, 5);
+    ctx.moveTo(20, 0);
+    ctx.lineTo(-7, -7);
+    ctx.lineTo(-7, 7);
     ctx.closePath();
     ctx.fill();
 
