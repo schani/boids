@@ -13,20 +13,19 @@ const width = canvas.scrollWidth;
 const height = canvas.scrollHeight;
 
 const radius = 100;
-const scale = 5;
+const scale = 7;
 
 const boids = [];
-// for (let i = 0; i < 1000; i++) {
-//   fs.push(new Follower(colorArray[i % 5], new Vector2(Math.random() * width, Math.random() * height), Math.random() * 2));
-// }
 
+const drawCenterOfGravity = true;
 
-for (let i = 0; i < 300; i++) {
+const turbo = 1;
+
+for (let i = 0; i < 1000; i++) {
   boids.push(new Boid(width * scale, height * scale, colorArray[i % 5]));
 }
 
-function updateASingleBoid(boid) {
-  //
+function calculateSingleBoid(boid) {
   // get the list of all the nearby boids and store in nearBoids
   const nearBoids = [];
 
@@ -39,28 +38,37 @@ function updateASingleBoid(boid) {
     }
   }
 
-  boid.update(nearBoids);
-  boid.draw(ctx);
+  boid.calculate(nearBoids);
 }
 
 function animate() {
   requestAnimationFrame(animate)
 
+  for (let i = 0; i < turbo; i++) {
+    for (const boid of boids) {
+      calculateSingleBoid(boid);
+    }
+    for (const boid of boids) {
+      boid.update();
+    }
+  }
+
   ctx.save();
+
   ctx.clearRect(0, 0, width, height);
   ctx.scale(1 / scale, 1 / scale);
 
   let sum = new Vector2(0, 0);
-
   for (const boid of boids) {
-    updateASingleBoid(boid);
-
+    boid.draw(ctx);
     sum.add(boid.position);
   }
 
-  sum.div(boids.length);
-  ctx.fillStyle = "#ff0000";
-  ctx.fillRect(sum.x - 30, sum.y - 30, 60, 60);
+  if (drawCenterOfGravity) {
+    sum.div(boids.length);
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(sum.x - 30, sum.y - 30, 60, 60);
+  }
 
   ctx.restore();
 }

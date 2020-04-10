@@ -15,9 +15,8 @@ class Boid {
     this.height = height;
 
     this.position = new Vector2(Math.random() * width, Math.random() * height);
-    this.velocity = new Vector2(Math.random() - 0.5, Math.random() - 0.5);
-    this.velocity.mul(10);
-    // this.acceleration = acceleration;
+    this.velocity = new Vector2(Math.random() - 0.5, Math.random() - 0.5).mul(10);
+
     this.color = color;
 
     this.targetVelocity = MAX_VELOCITY * Math.random();
@@ -94,22 +93,25 @@ class Boid {
     }
   }
 
-  update(boids) {
+  calculate(boids) {
     const diff = (this.targetVelocity - this.velocity.length());
-    this.velocity.add(Vector2.norm(this.velocity).mul(diff * 0.2));
+    this.nextVelocity = Vector2.add(this.velocity,Vector2.norm(this.velocity).mul(diff * 0.2) );
 
-    this.velocity.add(this.align(boids));
+    this.nextVelocity.add(this.align(boids));
 
-    this.velocity.add(this.cohesion(boids));
-    this.velocity.add(this.separation(boids, 3));
+    this.nextVelocity.add(this.cohesion(boids));
+    this.nextVelocity.add(this.separation(boids, 3));
 
-    if (mouse !== undefined) {
-      this.velocity.add(this.separation([mouse], 70));
-    }
-
-    this.position.add(this.velocity);
+    // if (mouse !== undefined) {
+    //   this.velocity.add(this.separation([mouse], 70));
+    // }
 
     this.stayInBounds();
+  }
+
+  update() {
+    this.velocity = this.nextVelocity;
+    this.position.add(this.velocity);
   }
 
   draw(ctx) {
