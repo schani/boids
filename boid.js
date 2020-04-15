@@ -1,5 +1,3 @@
-const MAX_VELOCITY = 7;
-
 let mouse = undefined;
 
 const c = document.getElementById('canvas');
@@ -10,7 +8,7 @@ c.addEventListener('mousemove',
 
 
 class Boid {
-  constructor(width, height, color) {
+  constructor(width, height, color, targetVelocity) {
     this.width = width;
     this.height = height;
 
@@ -19,24 +17,26 @@ class Boid {
 
     this.color = color;
 
-    this.targetVelocity = MAX_VELOCITY * Math.random();
+    this.targetVelocity = targetVelocity;
   }
 
 
   align(boids) {
     let steer = new Vector2(0, 0);
-    let doSteer = false;
+    let n = 0
 
     for (const boid of boids) {
+      if (this.color === boid.color) {
       steer.add(boid.velocity);
-      doSteer = true;
+        n++
+      }
     }
 
-    if (!doSteer) {
+    if (n === 0) {
       return new Vector2(0, 0);
     }
 
-    steer.div(boids.length);
+    steer.div(n);
 
     let align = steer.sub(this.velocity);
     return Vector2.norm(align).div(4);
@@ -44,20 +44,20 @@ class Boid {
 
   cohesion(boids) {
     let steer = new Vector2(0, 0);
-    let doSteer = false;
+    let n = 0
 
     for (const boid of boids) {
-      // if (this.color === boid.color) {
+      if (this.color === boid.color) {
         steer.add(boid.position);
-        doSteer = true;
-      // }
+        n++
+      }
     }
 
-    if (!doSteer) {
+    if (n === 0) {
       return new Vector2(0, 0);
     }
 
-    steer.div(boids.length);
+    steer.div(n);
 
     let cohesion = steer.sub(this.position);
     return Vector2.norm(cohesion).div(4);
@@ -81,15 +81,15 @@ class Boid {
 
   stayInBounds() {
     if (this.position.x < 0) {
-      this.velocity.x = Math.abs(this.velocity.x);
+      this.nextVelocity.x = Math.abs(this.nextVelocity.x);
     } else if (this.position.x > this.width) {
-      this.velocity.x = -Math.abs(this.velocity.x);
+      this.nextVelocity.x = -Math.abs(this.nextVelocity.x);
     }
 
     if (this.position.y < 0) {
-      this.velocity.y = Math.abs(this.velocity.y);
+      this.nextVelocity.y = Math.abs(this.nextVelocity.y);
     } else if (this.position.y > this.height) {
-      this.velocity.y = -Math.abs(this.velocity.y);
+      this.nextVelocity.y = -Math.abs(this.nextVelocity.y);
     }
   }
 
