@@ -1,6 +1,7 @@
 let mouse = undefined;
 
 const startLife = 300;
+const separationCoefficient = 3;
 
 const c = document.getElementById('canvas');
 c.addEventListener('mousemove',
@@ -39,64 +40,6 @@ class Boid {
     return [this, b];
   }
 
-  align(boids) {
-    let steer = new Vector2(0, 0);
-    let n = 0
-
-    for (const boid of boids) {
-      if (this.color === boid.color) {
-        steer.add(boid.velocity);
-        n++
-      }
-    }
-
-    if (n === 0) {
-      return steer;
-    }
-
-    steer.div(n);
-
-    let align = steer.sub(this.velocity);
-    return Vector2.norm(align).div(4);
-  }
-
-  cohesion(boids) {
-    let steer = new Vector2(0, 0);
-    let n = 0
-
-    for (const boid of boids) {
-      if (this.color === boid.color) {
-        steer.add(boid.position);
-        n++
-      }
-    }
-
-    if (n === 0) {
-      return steer;
-    }
-
-    steer.div(n);
-
-    let cohesion = steer.sub(this.position);
-    return Vector2.norm(cohesion).div(4);
-
-  }
-
-  separation(boids, separationFactor) {
-    let finalVec = new Vector2();
-
-    for (const boid of boids) {
-      let diff = Vector2.sub(this.position, boid.position);
-      let len = diff.length();
-      diff.norm();
-      diff.mul(1 / len * separationFactor);
-
-      finalVec.add(diff);
-    }
-
-    return finalVec;
-  }
-
   stayInBounds() {
     if (this.position.x < 0) {
       this.nextVelocity.x = Math.abs(this.nextVelocity.x);
@@ -111,36 +54,59 @@ class Boid {
     }
   }
 
-  updateLife(boids) {
-    let n = 0;
-    for (const boid of boids) {
-      if (this.color === boid.color) {
-        n += 1;
-      }
-    }
-    if (n < 5 || n > 17) {
-      this.life -= 1;
-    } else {
-      this.life += 1;
-    }
-  }
-
   calculate(boids) {
     const diff = (this.targetVelocity - this.velocity.length());
     this.nextVelocity = Vector2.add(this.velocity, Vector2.norm(this.velocity).mul(diff * 0.2));
 
-    this.nextVelocity.add(this.align(boids));
+    let alignSteer = new Vector2(0, 0);
+    let cohesionSteer = new Vector2(0, 0);
+    let separationSteer = new Vector2(0, 0);
+    let numFriends = 0;
 
-    this.nextVelocity.add(this.cohesion(boids));
-    this.nextVelocity.add(this.separation(boids, 3));
+    for (const boid of boids) {
+      // separation
+      const diff = Vector2.sub(this.position, boid.position);
+      const len = diff.length();
+      diff.norm();
+      diff.mul(1 / len * separationCoefficient);
+      separationSteer.add(diff);
 
-    // if (mouse !== undefined) {
-    //   this.velocity.add(this.separation([mouse], 70));
-    // }
+      if (this.color === boid.color) {
+        // alignment
+        alignSteer.add(boid.velocity);
+
+        // cohesion
+        cohesionSteer.add(boid.position);
+
+        numFriends++
+      }
+    }
+
+    // separation
+    this.nextVelocity.add(separationSteer);
+
+    // alignment
+    if (numFriends > 0) {
+      alignSteer.div(numFriends);
+      const align = alignSteer.sub(this.velocity);
+      this.nextVelocity.add(Vector2.norm(align).div(4));
+    }
+
+    // cohesion
+    if (numFriends > 0) {
+      cohesionSteer.div(numFriends);
+      const cohesion = cohesionSteer.sub(this.position);
+      this.nextVelocity.add(Vector2.norm(cohesion).div(4));
+    }
 
     this.stayInBounds();
 
-    this.updateLife(boids);
+    // update life
+    if (numFriends < 5 || numFriends > 17) {
+      this.life -= 1;
+    } else {
+      this.life += 1;
+    }
 
     if (this.life > startLife * 2) {
       return this.split();
