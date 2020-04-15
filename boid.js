@@ -1,5 +1,7 @@
 let mouse = undefined;
 
+const startLife = 300;
+
 const c = document.getElementById('canvas');
 c.addEventListener('mousemove',
   (event) => {
@@ -18,8 +20,24 @@ class Boid {
     this.color = color;
 
     this.targetVelocity = targetVelocity;
+
+    this.life = startLife;
   }
 
+  split() {
+    const b = new Boid(this.width, this.height, this.color, this.targetVelocity);
+    b.position = new Vector2(this.position.x + 3, this.position.y + 3);
+    b.velocity = new Vector2(this.velocity.x, this.velocity.y);
+    b.life = this.life = this.life / 2;
+    if (this.nextPosition !== undefined) {
+      b.nextPosition = new Vector2(this.nextPosition.x + 3, this.nextPosition.y + 3);
+    }
+    if (this.nextVelocity != undefined) {
+      b.nextVelocity = new Vector2(this.nextVelocity.x, this.nextVelocity.y);
+
+    }
+    return [this, b];
+  }
 
   align(boids) {
     let steer = new Vector2(0, 0);
@@ -27,7 +45,7 @@ class Boid {
 
     for (const boid of boids) {
       if (this.color === boid.color) {
-      steer.add(boid.velocity);
+        steer.add(boid.velocity);
         n++
       }
     }
@@ -93,9 +111,23 @@ class Boid {
     }
   }
 
+  updateLife(boids) {
+    let n = 0;
+    for (const boid of boids) {
+      if (this.color === boid.color) {
+        n += 1;
+      }
+    }
+    if (n < 5 || n > 15) {
+      this.life -= 1;
+    } else {
+      this.life += 1;
+    }
+  }
+
   calculate(boids) {
     const diff = (this.targetVelocity - this.velocity.length());
-    this.nextVelocity = Vector2.add(this.velocity,Vector2.norm(this.velocity).mul(diff * 0.2) );
+    this.nextVelocity = Vector2.add(this.velocity, Vector2.norm(this.velocity).mul(diff * 0.2));
 
     this.nextVelocity.add(this.align(boids));
 
@@ -107,6 +139,16 @@ class Boid {
     // }
 
     this.stayInBounds();
+
+    this.updateLife(boids);
+
+    if (this.life > startLife * 2) {
+      return this.split();
+    } else if (this.life > 0) {
+      return [this];
+    } else {
+      return [];
+    }
   }
 
   update() {
@@ -115,20 +157,18 @@ class Boid {
   }
 
   draw(ctx) {
-    ctx.fillStyle = this.color;
-    ctx.save();
-
-    ctx.translate(this.position.x, this.position.y);
     const angleRad = Math.atan2(this.velocity.y, this.velocity.x);
-    ctx.rotate(angleRad)
 
-    ctx.beginPath();
-    ctx.moveTo(20, 0);
-    ctx.lineTo(-7, -7);
-    ctx.lineTo(-7, 7);
-    ctx.closePath();
-    ctx.fill();
+    const sin = Math.sin(angleRad);
+    const cos = Math.cos(angleRad);
 
-    ctx.restore();
+    function rotatePoint(x, y, position) {
+      return [(x * cos - y * sin) + position.x, (x * sin + y * cos) + position.y]
+    }
+
+    ctx.moveTo(...rotatePoint(20, 0, this.position));
+    ctx.lineTo(...rotatePoint(-7, 7, this.position));
+    ctx.lineTo(...rotatePoint(-7, -7, this.position));
+    ctx.lineTo(...rotatePoint(20, 0, this.position));
   }
 }

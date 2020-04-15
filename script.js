@@ -7,7 +7,7 @@ const colorArray = [
 ]
 
 const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { alpha: false });
 
 const width = canvas.scrollWidth;
 const height = canvas.scrollHeight;
@@ -16,13 +16,13 @@ const MAX_VELOCITY = 7;
 const radius = 100;
 const scale = 4;
 
-const boids = [];
+let boids = [];
 
 const drawCenterOfGravity = false;
 
 const turbo = 1;
 
-for (let i = 0; i < 1000; i++) {
+for (let i = 0; i < 3000; i++) {
   const mod = i % colorArray.length;
   const color = colorArray[mod];
   const targetVelocity = MAX_VELOCITY; //* (mod + 1) /  colorArray.length;
@@ -30,11 +30,64 @@ for (let i = 0; i < 1000; i++) {
   boids.push(new Boid(width * scale, height * scale, color, targetVelocity));
 }
 
-function calculateSingleBoid(boid) {
+class DefaultArray2D {
+  constructor(makeDefault) {
+    this.makeDefault = makeDefault;
+    this.arr = [];
+  }
+
+  get(x, y) {
+    let row = this.arr[x];
+    if (row === undefined) {
+      row = this.arr[x] = [];
+    }
+    let cell = row[y];
+    if (cell === undefined) {
+      cell = row[y] = this.makeDefault();
+    }
+    return cell;
+  }
+
+  
+}
+
+function boidSlice(b) {
+    let x = b.position.x;
+    let y = b.position.y;
+    let sliceX = Math.max(0, Math.floor(x / radius));
+    let sliceY = Math.max(0, Math.floor(y / radius));
+
+    return {x: sliceX, y: sliceY};
+}
+
+function slice(boids) {
+  let sliceArray = new DefaultArray2D(() => []);
+  for (const b of boids) {
+    let {x, y} = boidSlice(b);
+    sliceArray.get(x, y).push(b);
+  }
+
+  return sliceArray;
+}
+
+function calculateSingleBoid(boid, sliceArray) {
   // get the list of all the nearby boids and store in nearBoids
   const nearBoids = [];
 
-  for (const b of boids) {
+  // for b in boids where b is within boid.sliceContainer & boid.adjacentSlices
+
+  let {x, y} = boidSlice(boid);
+  let boidsInSlice = [];
+
+  for (const dx of [-1, 0, 1]) {
+    for (const dy of [-1, 0, 1]) {
+      const sx = x + dx;
+      const sy = y + dy;
+      boidsInSlice.push(...sliceArray.get(sx, sy));
+    }
+  }
+
+  for (const b of boidsInSlice) {
     if (b !== boid) {
       let dist = Vector2.dist(b.position, boid.position);
       if (dist < radius) {
@@ -43,7 +96,7 @@ function calculateSingleBoid(boid) {
     }
   }
 
-  boid.calculate(nearBoids);
+  return boid.calculate(nearBoids);
 }
 
 let lastFrameTime = Date.now();
@@ -56,9 +109,12 @@ function animate() {
   lastFrameTime = now;
 
   for (let i = 0; i < turbo; i++) {
+    const newBoids = [];
+    const sliceArray = slice(boids);
     for (const boid of boids) {
-      calculateSingleBoid(boid);
+      newBoids.push(...calculateSingleBoid(boid, sliceArray));
     }
+    boids = newBoids;
     for (const boid of boids) {
       boid.update();
     }
@@ -66,17 +122,29 @@ function animate() {
 
   ctx.save();
 
-  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, width, height);
 
+  ctx.fillStyle = "black";
   ctx.font = "16px serif";
+  ctx.fillText(boids.length.toString(), width - 50, height - 5);
+  
   ctx.fillText(Math.floor(1000 / frameDuration).toString(), 5, height - 5);
 
-  ctx.scale(1 / scale, 1 / scale);
+  
+
+  ctx.scale(1/scale, 1/scale);
 
   let sum = new Vector2(0, 0);
-  for (const boid of boids) {
-    boid.draw(ctx);
-    sum.add(boid.position);
+  for (const color of colorArray) {
+    ctx.beginPath()
+    for (const boid of boids) {
+      if (boid.color !== color) continue;
+      boid.draw(ctx);
+      sum.add(boid.position);
+    }
+    ctx.fillStyle = color;
+    ctx.fill()
   }
 
   if (drawCenterOfGravity) {
