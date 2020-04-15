@@ -2,7 +2,7 @@ const colorArray = [
   '#018AC0',
   '#0DD7D1',
   '#B265E9',
-  // '#F2BD7B',
+  '#F2BD7B',
   // '#F7907D'
 ]
 
@@ -12,7 +12,7 @@ const ctx = canvas.getContext('2d', { alpha: false });
 const width = canvas.scrollWidth;
 const height = canvas.scrollHeight;
 
-const MAX_VELOCITY = 7;
+const MAX_VELOCITY = 5;
 const radius = 100;
 const scale = 4;
 
@@ -33,7 +33,7 @@ for (let i = 0; i < 3000; i++) {
 class DefaultArray2D {
   constructor(makeDefault) {
     this.makeDefault = makeDefault;
-    this.arr = [];
+    this.arr = []
   }
 
   get(x, y) {
@@ -48,22 +48,22 @@ class DefaultArray2D {
     return cell;
   }
 
-  
+
 }
 
 function boidSlice(b) {
-    let x = b.position.x;
-    let y = b.position.y;
-    let sliceX = Math.max(0, Math.floor(x / radius));
-    let sliceY = Math.max(0, Math.floor(y / radius));
+  let x = b.position.x;
+  let y = b.position.y;
+  let sliceX = Math.max(0, Math.floor(x / radius));
+  let sliceY = Math.max(0, Math.floor(y / radius));
 
-    return {x: sliceX, y: sliceY};
+  return { x: sliceX, y: sliceY };
 }
 
 function slice(boids) {
   let sliceArray = new DefaultArray2D(() => []);
   for (const b of boids) {
-    let {x, y} = boidSlice(b);
+    let { x, y } = boidSlice(b);
     sliceArray.get(x, y).push(b);
   }
 
@@ -74,24 +74,21 @@ function calculateSingleBoid(boid, sliceArray) {
   // get the list of all the nearby boids and store in nearBoids
   const nearBoids = [];
 
-  // for b in boids where b is within boid.sliceContainer & boid.adjacentSlices
-
-  let {x, y} = boidSlice(boid);
+  let { x, y } = boidSlice(boid);
   let boidsInSlice = [];
 
   for (const dx of [-1, 0, 1]) {
     for (const dy of [-1, 0, 1]) {
       const sx = x + dx;
       const sy = y + dy;
-      boidsInSlice.push(...sliceArray.get(sx, sy));
-    }
-  }
 
-  for (const b of boidsInSlice) {
-    if (b !== boid) {
-      let dist = Vector2.dist(b.position, boid.position);
-      if (dist < radius) {
-        nearBoids.push(b);
+      for (const b of sliceArray.get(sx, sy)) {
+        if (b !== boid) {
+          let dist = Vector2.dist(b.position, boid.position);
+          if (dist < radius) {
+            nearBoids.push(b);
+          }
+        }
       }
     }
   }
@@ -128,12 +125,12 @@ function animate() {
   ctx.fillStyle = "black";
   ctx.font = "16px serif";
   ctx.fillText(boids.length.toString(), width - 50, height - 5);
-  
+
   ctx.fillText(Math.floor(1000 / frameDuration).toString(), 5, height - 5);
 
-  
 
-  ctx.scale(1/scale, 1/scale);
+
+  ctx.scale(1 / scale, 1 / scale);
 
   let sum = new Vector2(0, 0);
   for (const color of colorArray) {

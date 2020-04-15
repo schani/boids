@@ -51,7 +51,7 @@ class Boid {
     }
 
     if (n === 0) {
-      return new Vector2(0, 0);
+      return steer;
     }
 
     steer.div(n);
@@ -72,7 +72,7 @@ class Boid {
     }
 
     if (n === 0) {
-      return new Vector2(0, 0);
+      return steer;
     }
 
     steer.div(n);
@@ -118,7 +118,7 @@ class Boid {
         n += 1;
       }
     }
-    if (n < 5 || n > 15) {
+    if (n < 5 || n > 17) {
       this.life -= 1;
     } else {
       this.life += 1;
@@ -166,9 +166,10 @@ class Boid {
       return [(x * cos - y * sin) + position.x, (x * sin + y * cos) + position.y]
     }
 
-    ctx.moveTo(...rotatePoint(20, 0, this.position));
+    const start = rotatePoint(20, 0, this.position)
+    ctx.moveTo(...start);
     ctx.lineTo(...rotatePoint(-7, 7, this.position));
     ctx.lineTo(...rotatePoint(-7, -7, this.position));
-    ctx.lineTo(...rotatePoint(20, 0, this.position));
+    ctx.lineTo(...start);
   }
 }
