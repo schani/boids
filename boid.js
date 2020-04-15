@@ -120,7 +120,7 @@ class Boid {
     this.stayInBounds();
 
     // update life
-    if (numFriends < 5 || numFriends > 20) {
+    if (numFriends < 5 || numFriends > 17) {
       this.life -= 1;
     } else {
       this.life += 1;

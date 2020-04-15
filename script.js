@@ -1,9 +1,14 @@
 const colorArray = [
-  '#018AC0',
-  '#0DD7D1',
-  '#B265E9',
-  '#F2BD7B',
-  // '#F7907D'
+  "#F9F84F",
+  "#FF718D",
+  "#29CDFF",
+  "#42E5E0",
+  "#7A79FF",
+  "#4467F8",
+  "#E16AE3",
+  "#18A0AE",
+  "#E19A7A",
+  "#A659E3"
 ]
 
 const canvas = document.getElementById('canvas');
