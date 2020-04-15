@@ -72,7 +72,10 @@ class Boid {
   }
 
   calculate(boids) {
-    const diff = (this.targetVelocity - this.velocity.length());
+    let { targetVelocity } = this;
+    targetVelocity *= 1 + (this.life - startLife) / startLife / 2;
+
+    const diff = (targetVelocity - this.velocity.length());
     this.nextVelocity = Vector2.add(this.velocity, Vector2.norm(this.velocity).mul(diff * 0.2));
 
     let alignSteer = new Vector2(0, 0);
@@ -120,7 +123,7 @@ class Boid {
     this.stayInBounds();
 
     // update life
-    if (numFriends < 5 || numFriends > 17) {
+    if (numFriends < 5 || numFriends > 14) {
       this.life -= 1;
     } else {
       this.life += 1;
@@ -150,10 +153,12 @@ class Boid {
       return [(x * cos - y * sin) + position.x, (x * sin + y * cos) + position.y]
     }
 
-    const start = rotatePoint(20, 0, this.position)
+    const scale = 0.5 + 0.5 * (this.life / 600);
+
+    const start = rotatePoint(20 * scale, 0, this.position)
     ctx.moveTo(...start);
-    ctx.lineTo(...rotatePoint(-7, 7, this.position));
-    ctx.lineTo(...rotatePoint(-7, -7, this.position));
+    ctx.lineTo(...rotatePoint(-7 * scale, 7 * scale, this.position));
+    ctx.lineTo(...rotatePoint(-7 * scale, -7 * scale, this.position));
     ctx.lineTo(...start);
   }
 }
