@@ -2,6 +2,8 @@ let mouse = undefined;
 
 const startLife = 300;
 const separationCoefficient = 3;
+const wallDistance = 150;
+const wallFactor = 20;
 
 const c = document.getElementById('canvas');
 c.addEventListener('mousemove',
@@ -99,10 +101,24 @@ class Boid {
       this.nextVelocity.add(Vector2.norm(cohesion).div(4));
     }
 
+    // walls
+    if (this.position.x < wallDistance) {
+      this.nextVelocity.add(new Vector2(1 / this.position.x * wallFactor, 0));
+    }
+    if (this.position.y < wallDistance) {
+      this.nextVelocity.add(new Vector2(0, 1 / this.position.y * wallFactor));
+    }
+    if (this.position.x > this.width - wallDistance) {
+      this.nextVelocity.add(new Vector2(1 / (this.position.x - this.width) * wallFactor, 0));
+    }
+    if (this.position.y > this.height - wallDistance) {
+      this.nextVelocity.add(new Vector2(0, 1 / (this.position.y - this.height) * wallFactor));
+    }
+
     this.stayInBounds();
 
     // update life
-    if (numFriends < 5 || numFriends > 17) {
+    if (numFriends < 5 || numFriends > 20) {
       this.life -= 1;
     } else {
       this.life += 1;
