@@ -159,7 +159,7 @@ class Boid {
         return [];
       }
 
-      if (numFriends < 5 || numFriends > 18) {
+      if (numFriends < 5 || numFriends > 19) {
         this.life -= 1;
       } else {
         this.life += 1;
