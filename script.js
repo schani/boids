@@ -139,7 +139,8 @@ function animate() {
 
   ctx.fillText(Math.floor(1000 / frameDuration).toString(), 5, height - 5);
 
-
+  const numPredators = boids.filter(b => b.predator).length;
+  ctx.fillText(numPredators.toString(), width / 2, height - 5);
 
   ctx.scale(1 / scale, 1 / scale);
 
