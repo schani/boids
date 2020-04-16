@@ -190,7 +190,7 @@ class Boid {
       return [(x * cos - y * sin) + position.x, (x * sin + y * cos) + position.y]
     }
 
-    let scale = 0.5 + 0.5 * (this.life / 600);
+    let scale = 1 * (0.5 + 0.5 * (this.life / 600));
     if (this.predator) scale *= 2;
 
     const start = rotatePoint(20 * scale, 0, this.position)

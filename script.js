@@ -2,8 +2,8 @@ const colorArray = [
   "#A3A84F",
   "#FF718D",
   "#29CDFF",
-  // "#42E5E0",
-  // "#7A79FF",
+  "#42E5E0",
+  "#7A79FF",
   // "#4467F8",
   // "#E16AE3",
   // "#18A0AE",
@@ -163,5 +163,7 @@ function animate() {
   }
 
   ctx.restore();
+
+  drawGraph(boids.length - numPredators, numPredators);
 }
 animate()
