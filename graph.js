@@ -4,13 +4,14 @@ const graphCtx = graph.getContext("2d", { alpha: false });
 const graphWidth = graph.scrollWidth;
 const graphHeight = graph.scrollHeight;
 
-const graphScale = 20;
+const maxGraphScale = 320;
 
 class Graph {
   constructor(color) {
     this.color = color;
     this.history = [];
     this.max = 0;
+    this.scale = 1;
     this.resetAcc();
   }
 
@@ -20,11 +21,23 @@ class Graph {
   }
 
   addToHistory(y) {
-
     this.history.push(y);
-    while (this.history.length > graphWidth) {
-      this.history.shift();
+
+    if (this.history.length > graphWidth) {
+      if (this.scale < maxGraphScale) {
+        const newHistory = [];
+        for (let i = 0; i < this.history.length - 1; i += 2) {
+          newHistory.push((this.history[i] + this.history[i+1]) / 2);
+        }
+        this.history = newHistory;
+        this.scale *= 2;
+      } else {
+        while (this.history.length > graphWidth) {
+          this.history.shift();
+        }
+      }
     }
+
     this.max = Math.max(this.max, y);
 
     // console.log(this.color, y, JSON.stringify(this.history));;
@@ -49,7 +62,7 @@ class Graph {
     this.acc += y;
     this.accCount++;
 
-    if (this.accCount < graphScale) return false;
+    if (this.accCount < this.scale) return false;
 
     this.addToHistory(this.acc / this.accCount);
     this.resetAcc();

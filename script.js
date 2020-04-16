@@ -7,8 +7,8 @@ const colorArray = [
   // "#4467F8",
   // "#E16AE3",
   // "#18A0AE",
-  //"#E19A7A",
-  //"#A659E3"
+  // "#E19A7A",
+  // "#A659E3"
 ]
 
 const includePredators = true;
@@ -24,7 +24,7 @@ const height = canvas.scrollHeight;
 
 const MAX_VELOCITY = 5;
 const radius = 100;
-const scale = 4;
+const scale = 5;
 
 let boids = [];
 
@@ -32,7 +32,7 @@ const drawCenterOfGravity = false;
 
 const turbo = 1;
 
-for (let i = 0; i < 3000; i++) {
+for (let i = 0; i < 5000; i++) {
   const mod = i % colorArray.length;
   const predator = i % 200 === 0 && includePredators;
   const color = predator ? predatorColor : colorArray[mod];
