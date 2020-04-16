@@ -2,14 +2,19 @@ const colorArray = [
   "#A3A84F",
   "#FF718D",
   "#29CDFF",
-  "#42E5E0",
-  "#7A79FF",
-  "#4467F8",
-  "#E16AE3",
+  // "#42E5E0",
+  // "#7A79FF",
+  // "#4467F8",
+  // "#E16AE3",
   // "#18A0AE",
-  // "#E19A7A",
-  // "#A659E3"
+  //"#E19A7A",
+  //"#A659E3"
 ]
+
+const includePredators = true;
+
+const predatorColor = "#FF4444";
+const predatorSpeedBonus = 1.9;
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d', { alpha: false });
@@ -29,10 +34,11 @@ const turbo = 1;
 
 for (let i = 0; i < 3000; i++) {
   const mod = i % colorArray.length;
-  const color = colorArray[mod];
-  const targetVelocity = MAX_VELOCITY; //* (mod + 1) /  colorArray.length;
+  const predator = i % 200 === 0 && includePredators;
+  const color = predator ? predatorColor : colorArray[mod];
+  const targetVelocity = predator ? MAX_VELOCITY * predatorSpeedBonus : MAX_VELOCITY; //* (mod + 1) /  colorArray.length;
 
-  boids.push(new Boid(width * scale, height * scale, color, targetVelocity));
+  boids.push(new Boid(width * scale, height * scale, color, targetVelocity, predator));
 }
 
 class DefaultArray2D {
@@ -138,7 +144,7 @@ function animate() {
   ctx.scale(1 / scale, 1 / scale);
 
   let sum = new Vector2(0, 0);
-  for (const color of colorArray) {
+  for (const color of [...colorArray, predatorColor]) {
     ctx.beginPath()
     for (const boid of boids) {
       if (boid.color !== color) continue;
