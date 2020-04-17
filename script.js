@@ -107,27 +107,12 @@ function calculateSingleBoid(boid, sliceArray) {
   return boid.calculate(nearBoids);
 }
 
-let lastFrameTime = Date.now();
+function getNumPredators() {
+  return boids.filter(b => b.predator).length;
+  ctx.fillText(numPredators.toString(), width / 2, height - 5);
+}
 
-function animate() {
-  requestAnimationFrame(animate)
-
-  const now = Date.now();
-  const frameDuration = now - lastFrameTime;
-  lastFrameTime = now;
-
-  for (let i = 0; i < turbo; i++) {
-    const newBoids = [];
-    const sliceArray = slice(boids);
-    for (const boid of boids) {
-      newBoids.push(...calculateSingleBoid(boid, sliceArray));
-    }
-    boids = newBoids;
-    for (const boid of boids) {
-      boid.update();
-    }
-  }
-
+function drawBoids(frameDuration, numPredators) {
   ctx.save();
 
   ctx.fillStyle = "white";
@@ -138,9 +123,6 @@ function animate() {
   ctx.fillText(boids.length.toString(), width - 50, height - 5);
 
   ctx.fillText(Math.floor(1000 / frameDuration).toString(), 5, height - 5);
-
-  const numPredators = boids.filter(b => b.predator).length;
-  ctx.fillText(numPredators.toString(), width / 2, height - 5);
 
   ctx.scale(1 / scale, 1 / scale);
 
@@ -163,7 +145,38 @@ function animate() {
   }
 
   ctx.restore();
+}
 
-  drawGraph(boids.length - numPredators, numPredators);
+let lastFrameTime = Date.now();
+
+function animate() {
+  requestAnimationFrame(animate)
+
+  const now = Date.now();
+  const frameDuration = now - lastFrameTime;
+  lastFrameTime = now;
+
+  let numFrames = turbo;
+  if (frameDuration > 20) {
+    numFrames *= 2;
+  }
+  
+  let numPredators;
+  for (let i = 0; i < numFrames; i++) {
+    const newBoids = [];
+    const sliceArray = slice(boids);
+    for (const boid of boids) {
+      newBoids.push(...calculateSingleBoid(boid, sliceArray));
+    }
+    boids = newBoids;
+    for (const boid of boids) {
+      boid.update();
+    }
+
+    numPredators = getNumPredators();
+    updateGraph(boids.length - numPredators, numPredators);
+  }
+
+  drawBoids(frameDuration, numPredators);
 }
 animate()

@@ -73,7 +73,7 @@ class Graph {
 let fishGraph = new Graph("blue");
 let sharkGraph = new Graph("red");
 
-function drawGraph(numFish, numShark) {
+function updateGraph(numFish, numShark) {
   const drawFish = fishGraph.addPoint(numFish);
   const drawShark = sharkGraph.addPoint(numShark);
 
