@@ -9,15 +9,15 @@ const colorArray = [
   // "#18A0AE",
   // "#E19A7A",
   // "#A659E3"
-]
+];
 
 const includePredators = true;
 
 const predatorColor = "#FF4444";
 const predatorSpeedBonus = 1.9;
 
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d', { alpha: false });
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d", { alpha: false });
 
 const width = canvas.scrollWidth;
 const height = canvas.scrollHeight;
@@ -36,15 +36,19 @@ for (let i = 0; i < 5000; i++) {
   const mod = i % colorArray.length;
   const predator = i % 200 === 0 && includePredators;
   const color = predator ? predatorColor : colorArray[mod];
-  const targetVelocity = predator ? MAX_VELOCITY * predatorSpeedBonus : MAX_VELOCITY; //* (mod + 1) /  colorArray.length;
+  const targetVelocity = predator
+    ? MAX_VELOCITY * predatorSpeedBonus
+    : MAX_VELOCITY; //* (mod + 1) /  colorArray.length;
 
-  boids.push(new Boid(width * scale, height * scale, color, targetVelocity, predator));
+  boids.push(
+    new Boid(width * scale, height * scale, color, targetVelocity, predator)
+  );
 }
 
 class DefaultArray2D {
   constructor(makeDefault) {
     this.makeDefault = makeDefault;
-    this.arr = []
+    this.arr = [];
   }
 
   get(x, y) {
@@ -58,8 +62,6 @@ class DefaultArray2D {
     }
     return cell;
   }
-
-
 }
 
 function boidSlice(b) {
@@ -86,7 +88,6 @@ function calculateSingleBoid(boid, sliceArray) {
   const nearBoids = [];
 
   let { x, y } = boidSlice(boid);
-  let boidsInSlice = [];
 
   for (const dx of [-1, 0, 1]) {
     for (const dy of [-1, 0, 1]) {
@@ -107,12 +108,7 @@ function calculateSingleBoid(boid, sliceArray) {
   return boid.calculate(nearBoids);
 }
 
-function getNumPredators() {
-  return boids.filter(b => b.predator).length;
-  ctx.fillText(numPredators.toString(), width / 2, height - 5);
-}
-
-function drawBoids(frameDuration, numPredators) {
+function drawBoids(frameDuration, numPredators, withBoids) {
   ctx.save();
 
   ctx.fillStyle = "white";
@@ -121,27 +117,29 @@ function drawBoids(frameDuration, numPredators) {
   ctx.fillStyle = "black";
   ctx.font = "16px serif";
   ctx.fillText(boids.length.toString(), width - 50, height - 5);
-
   ctx.fillText(Math.floor(1000 / frameDuration).toString(), 5, height - 5);
+  ctx.fillText(numPredators, width / 2, height - 5);
 
-  ctx.scale(1 / scale, 1 / scale);
+  if (withBoids) {
+    ctx.scale(1 / scale, 1 / scale);
 
-  let sum = new Vector2(0, 0);
-  for (const color of [...colorArray, predatorColor]) {
-    ctx.beginPath()
-    for (const boid of boids) {
-      if (boid.color !== color) continue;
-      boid.draw(ctx);
-      sum.add(boid.position);
+    let sum = new Vector2(0, 0);
+    for (const color of [...colorArray, predatorColor]) {
+      ctx.beginPath();
+      for (const boid of boids) {
+        if (boid.color !== color) continue;
+        boid.draw(ctx);
+        sum.add(boid.position);
+      }
+      ctx.fillStyle = color;
+      ctx.fill();
     }
-    ctx.fillStyle = color;
-    ctx.fill()
-  }
 
-  if (drawCenterOfGravity) {
-    sum.div(boids.length);
-    ctx.fillStyle = "#ff0000";
-    ctx.fillRect(sum.x - 30, sum.y - 30, 60, 60);
+    if (drawCenterOfGravity) {
+      sum.div(boids.length);
+      ctx.fillStyle = "#ff0000";
+      ctx.fillRect(sum.x - 30, sum.y - 30, 60, 60);
+    }
   }
 
   ctx.restore();
@@ -150,7 +148,7 @@ function drawBoids(frameDuration, numPredators) {
 let lastFrameTime = Date.now();
 
 function animate() {
-  requestAnimationFrame(animate)
+  requestAnimationFrame(animate);
 
   const now = Date.now();
   const frameDuration = now - lastFrameTime;
@@ -160,7 +158,7 @@ function animate() {
   if (frameDuration > 20) {
     numFrames *= 2;
   }
-  
+
   let numPredators;
   for (let i = 0; i < numFrames; i++) {
     const newBoids = [];
@@ -173,10 +171,10 @@ function animate() {
       boid.update();
     }
 
-    numPredators = getNumPredators();
+    numPredators = boids.filter((b) => b.predator).length;
     updateGraph(boids.length - numPredators, numPredators);
   }
 
-  drawBoids(frameDuration, numPredators);
+  drawBoids(frameDuration, numPredators, true);
 }
-animate()
+animate();
