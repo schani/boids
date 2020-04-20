@@ -8,12 +8,10 @@ const predatorDistance = 10;
 const predatorFoodGain = 30;
 const preyAvoidanceBonus = 10;
 
-const c = document.getElementById('canvas');
-c.addEventListener('mousemove',
-  (event) => {
-    mouse = { position: new Vector2(event.x * 5, event.y * 5) };
-  })
-
+const c = document.getElementById("canvas");
+c.addEventListener("mousemove", (event) => {
+  mouse = { position: new Vector2(event.x * 5, event.y * 5) };
+});
 
 class Boid {
   constructor(width, height, color, targetVelocity, predator) {
@@ -22,7 +20,9 @@ class Boid {
     this.predator = predator;
 
     this.position = new Vector2(Math.random() * width, Math.random() * height);
-    this.velocity = new Vector2(Math.random() - 0.5, Math.random() - 0.5).mul(10);
+    this.velocity = new Vector2(Math.random() - 0.5, Math.random() - 0.5).mul(
+      10
+    );
 
     this.color = color;
 
@@ -32,16 +32,24 @@ class Boid {
   }
 
   split() {
-    const b = new Boid(this.width, this.height, this.color, this.targetVelocity, this.predator);
+    const b = new Boid(
+      this.width,
+      this.height,
+      this.color,
+      this.targetVelocity,
+      this.predator
+    );
     b.position = new Vector2(this.position.x + 3, this.position.y + 3);
     b.velocity = new Vector2(this.velocity.x, this.velocity.y);
     b.life = this.life = this.life / 2;
     if (this.nextPosition !== undefined) {
-      b.nextPosition = new Vector2(this.nextPosition.x + 3, this.nextPosition.y + 3);
+      b.nextPosition = new Vector2(
+        this.nextPosition.x + 3,
+        this.nextPosition.y + 3
+      );
     }
     if (this.nextVelocity != undefined) {
       b.nextVelocity = new Vector2(this.nextVelocity.x, this.nextVelocity.y);
-
     }
     return [this, b];
   }
@@ -62,16 +70,20 @@ class Boid {
 
   avoidWalls() {
     if (this.position.x < wallDistance) {
-      this.nextVelocity.add(new Vector2(1 / this.position.x * wallFactor, 0));
+      this.nextVelocity.add(new Vector2((1 / this.position.x) * wallFactor, 0));
     }
     if (this.position.y < wallDistance) {
-      this.nextVelocity.add(new Vector2(0, 1 / this.position.y * wallFactor));
+      this.nextVelocity.add(new Vector2(0, (1 / this.position.y) * wallFactor));
     }
     if (this.position.x > this.width - wallDistance) {
-      this.nextVelocity.add(new Vector2(1 / (this.position.x - this.width) * wallFactor, 0));
+      this.nextVelocity.add(
+        new Vector2((1 / (this.position.x - this.width)) * wallFactor, 0)
+      );
     }
     if (this.position.y > this.height - wallDistance) {
-      this.nextVelocity.add(new Vector2(0, 1 / (this.position.y - this.height) * wallFactor));
+      this.nextVelocity.add(
+        new Vector2(0, (1 / (this.position.y - this.height)) * wallFactor)
+      );
     }
   }
 
@@ -79,8 +91,11 @@ class Boid {
     let { targetVelocity } = this;
     targetVelocity *= 1 + (this.life - startLife) / startLife / 2;
 
-    const diff = (targetVelocity - this.velocity.length());
-    this.nextVelocity = Vector2.add(this.velocity, Vector2.norm(this.velocity).mul(diff * 0.2));
+    const diff = targetVelocity - this.velocity.length();
+    this.nextVelocity = Vector2.add(
+      this.velocity,
+      Vector2.norm(this.velocity).mul(diff * 0.2)
+    );
 
     let alignSteer = new Vector2(0, 0);
     let cohesionSteer = new Vector2(0, 0);
@@ -91,11 +106,10 @@ class Boid {
     let wasEaten = false;
 
     for (const boid of boids) {
-      // separation
       const diff = Vector2.sub(this.position, boid.position);
       const len = diff.length();
-      diff.norm();
-      diff.mul(1 / len * separationCoefficient);
+
+      // separation
       if (this.predator) {
         if (!boid.predator) {
           if (len < predatorDistance) {
@@ -105,6 +119,9 @@ class Boid {
           cohesionSteer.add(boid.position);
         }
       } else {
+        diff.norm();
+        diff.mul((1 / len) * separationCoefficient);
+
         if (boid.predator && !this.predator) {
           if (len < predatorDistance) {
             wasEaten = true;
@@ -120,7 +137,7 @@ class Boid {
           // cohesion
           cohesionSteer.add(boid.position);
 
-          numFriends++
+          numFriends++;
         }
       }
     }
@@ -153,7 +170,7 @@ class Boid {
 
     // update life
     if (this.predator) {
-      this.life += -1 + (numPreyEaten * predatorFoodGain);
+      this.life += -1 + numPreyEaten * predatorFoodGain;
     } else {
       if (wasEaten) {
         return [];
@@ -187,13 +204,13 @@ class Boid {
     const cos = Math.cos(angleRad);
 
     function rotatePoint(x, y, position) {
-      return [(x * cos - y * sin) + position.x, (x * sin + y * cos) + position.y]
+      return [x * cos - y * sin + position.x, x * sin + y * cos + position.y];
     }
 
     let scale = 1 * (0.5 + 0.5 * (this.life / 600));
     if (this.predator) scale *= 2;
 
-    const start = rotatePoint(20 * scale, 0, this.position)
+    const start = rotatePoint(20 * scale, 0, this.position);
     ctx.moveTo(...start);
     ctx.lineTo(...rotatePoint(-7 * scale, 7 * scale, this.position));
     ctx.lineTo(...rotatePoint(-7 * scale, -7 * scale, this.position));
