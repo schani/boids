@@ -231,15 +231,13 @@ function gpuMain() {
 
   const kernel = gpu.createKernel(
     function (
-      boidXs,
-      boidYs,
+      boidXYs,
       boidSlices,
       neighborStarts,
       neighborEnds,
       sqrRadius
     ) {
-      let x = boidXs[this.thread.x];
-      let y = boidYs[this.thread.x];
+      let [x, y] = boidXYs[this.thread.x];
       let sliceIndex = boidSlices[this.thread.x];
 
       let separationSteerX = 0.0;
@@ -251,8 +249,7 @@ function gpuMain() {
         const end = neighborEnds[startsEndsIndex + ni];
         for (let i = start; i < end; i++) {
           if (i === this.thread.x) continue;
-          const x1 = boidXs[i];
-          const y1 = boidYs[i];
+          const [x1, y1] = boidXYs[i];
           %processBoid(x1, y1)
         }
       }
@@ -274,8 +271,7 @@ function gpuMain() {
 
   const sliced = slice(boids);
 
-  const boidXs = [];
-  const boidYs = [];
+  const boidXYs = [];
   const boidSlices = [];
   const sliceStarts = [];
   const sliceEnds = [];
@@ -287,14 +283,13 @@ function gpuMain() {
       const sliceIndex = sliceStarts.length;
       assert(sliceIndex === indexOfSlice(sliceX, sliceY));
 
-      const sliceStart = boidXs.length;
+      const sliceStart = boidXYs.length;
       const sliceBoids = sliced.get(sliceX, sliceY);
       for (const b of sliceBoids) {
-        boidXs.push(b.position.x);
-        boidYs.push(b.position.y);
+        boidXYs.push([b.position.x, b.position.y]);
         boidSlices.push(sliceIndex);
       }
-      const sliceEnd = boidXs.length;
+      const sliceEnd = boidXYs.length;
       sliceStarts.push(sliceStart);
       sliceEnds.push(sliceEnd);
       maxSliceLength = Math.max(maxSliceLength, sliceEnd - sliceStart);
@@ -327,8 +322,7 @@ function gpuMain() {
   console.log("max slice length", maxSliceLength);
 
   kernel(
-    boidXs,
-    boidYs,
+    boidXYs,
     boidSlices,
     neighborStarts,
     neighborEnds,
@@ -339,8 +333,7 @@ function gpuMain() {
   const start = Date.now();
   for (let i = 0; i < 1; i++) {
     result = kernel(
-      boidXs,
-      boidYs,
+      boidXYs,
       boidSlices,
       neighborStarts,
       neighborEnds,
