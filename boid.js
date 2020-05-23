@@ -198,22 +198,24 @@ class Boid {
   }
 
   draw(ctx) {
-    const angleRad = Math.atan2(this.velocity.y, this.velocity.x);
+    ctx.fillRect(this.position.x, this.position.y, scale * 2, scale * 2);
 
-    const sin = Math.sin(angleRad);
-    const cos = Math.cos(angleRad);
+    // const angleRad = Math.atan2(this.velocity.y, this.velocity.x);
 
-    function rotatePoint(x, y, position) {
-      return [x * cos - y * sin + position.x, x * sin + y * cos + position.y];
-    }
+    // const sin = Math.sin(angleRad);
+    // const cos = Math.cos(angleRad);
 
-    let scale = 1 * (0.5 + 0.5 * (this.life / 600));
-    if (this.predator) scale *= 2;
+    // function rotatePoint(x, y, position) {
+    //   return [x * cos - y * sin + position.x, x * sin + y * cos + position.y];
+    // }
 
-    const start = rotatePoint(20 * scale, 0, this.position);
-    ctx.moveTo(...start);
-    ctx.lineTo(...rotatePoint(-7 * scale, 7 * scale, this.position));
-    ctx.lineTo(...rotatePoint(-7 * scale, -7 * scale, this.position));
-    ctx.lineTo(...start);
+    // let scale = 1 * (0.5 + 0.5 * (this.life / 600));
+    // if (this.predator) scale *= 2;
+
+    // const start = rotatePoint(20 * scale, 0, this.position);
+    // ctx.moveTo(...start);
+    // ctx.lineTo(...rotatePoint(-7 * scale, 7 * scale, this.position));
+    // ctx.lineTo(...rotatePoint(-7 * scale, -7 * scale, this.position));
+    // ctx.lineTo(...start);
   }
 }
