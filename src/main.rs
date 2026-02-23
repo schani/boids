@@ -8,9 +8,9 @@ use winit::{
     window::WindowBuilder,
 };
 
-const WORLD_SIZE: [f32; 2] = [4000.0, 4000.0];
+const WORLD_SIZE: [f32; 2] = [8000.0, 8000.0];
 const BOID_CAPACITY: u32 = 50_000;
-const INITIAL_COUNT: u32 = 8_000;
+const INITIAL_COUNT: u32 = 32_000;
 const PREDATOR_RATIO: f32 = 0.005; // 0.5%
 
 const START_LIFE: f32 = 300.0;
@@ -25,11 +25,12 @@ const PREDATOR_SPEED_BONUS: f32 = 1.9;
 const PREDATOR_LIFE_MULT: f32 = 1.5;
 const RADIUS: f32 = 100.0;
 
-const GRAPH_SAMPLES: usize = 240;
 const GRAPH_SERIES: usize = 2; // combined prey + predators
 const GRAPH_READBACK_INTERVAL: u32 = 4;
 const GRAPH_HEIGHT_PX: u32 = 200;
 const GRAPH_PADDING_PX: f32 = 16.0;
+const GRAPH_MAX_SCALE: u32 = 320;
+const GRAPH_MAX_POINTS: usize = 8192;
 
 const FLAG_PREDATOR: u32 = 1 << 0;
 const FLAG_ALIVE: u32 = 1 << 1;
@@ -128,10 +129,13 @@ struct GraphVertex {
 }
 
 struct GraphState {
-    history: Vec<[u32; GRAPH_SERIES]>,
-    cursor: usize,
+    history: [Vec<f32>; GRAPH_SERIES],
+    scale: [u32; GRAPH_SERIES],
+    acc: [f32; GRAPH_SERIES],
+    acc_count: [u32; GRAPH_SERIES],
     frame: u32,
-    series_max: [u32; GRAPH_SERIES],
+    series_max: [f32; GRAPH_SERIES],
+    vertex_counts: [u32; GRAPH_SERIES],
 }
 
 struct State {
@@ -353,7 +357,7 @@ impl State {
         });
 
         let graph_vertex_capacity =
-            (GRAPH_SERIES as u64) * ((GRAPH_SAMPLES as u64 - 1) * 2) as u64;
+            (GRAPH_SERIES as u64) * ((GRAPH_MAX_POINTS as u64 - 1) * 2) as u64;
         let graph_vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("graph_vertices"),
             size: graph_vertex_capacity * std::mem::size_of::<GraphVertex>() as u64,
@@ -821,10 +825,13 @@ impl State {
             _buffers: buffers,
             bind_groups,
             graph: GraphState {
-                history: vec![[0u32; GRAPH_SERIES]; GRAPH_SAMPLES],
-                cursor: 0,
+                history: std::array::from_fn(|_| Vec::new()),
+                scale: [1u32; GRAPH_SERIES],
+                acc: [0.0; GRAPH_SERIES],
+                acc_count: [0u32; GRAPH_SERIES],
                 frame: 0,
-                series_max: [1u32; GRAPH_SERIES],
+                series_max: [1.0; GRAPH_SERIES],
+                vertex_counts: [0u32; GRAPH_SERIES],
             },
         };
         state.update_graph_vertices();
@@ -907,10 +914,13 @@ impl State {
                 render_pass.set_scissor_rect(0, boid_height, self.size.width, graph_height);
                 render_pass.set_pipeline(&self.pipelines.graph);
                 render_pass.set_vertex_buffer(0, self._buffers.graph_vertices.slice(..));
-                let per_series = (GRAPH_SAMPLES as u32 - 1) * 2;
+                let mut start = 0u32;
                 for s in 0..GRAPH_SERIES {
-                    let start = (s as u32) * per_series;
-                    render_pass.draw(start..start + per_series, 0..1);
+                    let count = self.graph.vertex_counts[s];
+                    if count > 0 {
+                        render_pass.draw(start..start + count, 0..1);
+                    }
+                    start += count;
                 }
             }
         }
@@ -1061,18 +1071,17 @@ impl State {
         self.device.poll(wgpu::Maintain::Wait);
         if let Ok(Ok(())) = receiver.recv() {
             let data = slice.get_mapped_range();
-            let counts: &[u32] = bytemuck::cast_slice(&data);
-            if counts.len() >= GRAPH_SERIES {
-                let mut entry = [0u32; GRAPH_SERIES];
-                entry.copy_from_slice(&counts[..GRAPH_SERIES]);
-                self.graph.history[self.graph.cursor] = entry;
-                self.graph.cursor = (self.graph.cursor + 1) % GRAPH_SAMPLES;
-                for s in 0..GRAPH_SERIES {
-                    self.graph.series_max[s] = self.graph.series_max[s].max(entry[s]);
-                }
+            let counts_src: &[u32] = bytemuck::cast_slice(&data);
+            let mut counts = [0u32; GRAPH_SERIES];
+            if counts_src.len() >= GRAPH_SERIES {
+                counts.copy_from_slice(&counts_src[..GRAPH_SERIES]);
             }
             drop(data);
             self._buffers.species_counts_read.unmap();
+            let width_limit = self.graph_width_limit();
+            for s in 0..GRAPH_SERIES {
+                self.add_graph_point(s, counts[s] as f32, width_limit);
+            }
         }
     }
 
@@ -1088,32 +1097,28 @@ impl State {
             (graph_height - 2.0 * GRAPH_PADDING_PX).max(1.0),
         ];
 
-        let mut max_counts = [1u32; GRAPH_SERIES];
-        for s in 0..GRAPH_SERIES {
-            max_counts[s] = self.graph.series_max[s].max(1);
-        }
-
         // Match the original graph behavior: one prey line and one predator line.
         let colors: [[f32; 3]; GRAPH_SERIES] = [
             [0.0, 0.0, 1.0], // prey
             [1.0, 0.0, 0.0], // predators
         ];
 
-        let mut vertices = Vec::with_capacity(GRAPH_SERIES * (GRAPH_SAMPLES - 1) * 2);
+        let mut vertices = Vec::new();
+        self.graph.vertex_counts = [0u32; GRAPH_SERIES];
         for s in 0..GRAPH_SERIES {
-            let color = colors[s];
-            let denom = max_counts[s] as f32;
-            for i in 0..(GRAPH_SAMPLES - 1) {
-                let idx0 = (self.graph.cursor + i) % GRAPH_SAMPLES;
-                let idx1 = (self.graph.cursor + i + 1) % GRAPH_SAMPLES;
-                let v0 = self.graph.history[idx0][s] as f32 / denom;
-                let v1 = self.graph.history[idx1][s] as f32 / denom;
+            let history = &self.graph.history[s];
+            if history.len() < 2 {
+                continue;
+            }
 
-                let x0 = origin[0] + (i as f32 / (GRAPH_SAMPLES as f32 - 1.0)) * size[0];
-                let x1 =
-                    origin[0] + ((i + 1) as f32 / (GRAPH_SAMPLES as f32 - 1.0)) * size[0];
-                let y0 = origin[1] + size[1] * (1.0 - v0);
-                let y1 = origin[1] + size[1] * (1.0 - v1);
+            let color = colors[s];
+            let denom = self.graph.series_max[s].max(1.0);
+            for i in 0..(history.len() - 1) {
+                // Align to the right edge, one x-unit per sample, like the original canvas graph.
+                let x0 = origin[0] + (size[0] - history.len() as f32 + i as f32);
+                let x1 = x0 + 1.0;
+                let y0 = origin[1] + size[1] * (1.0 - history[i] / denom);
+                let y1 = origin[1] + size[1] * (1.0 - history[i + 1] / denom);
 
                 let ndc0 = [x0 / width * 2.0 - 1.0, 1.0 - y0 / graph_height * 2.0];
                 let ndc1 = [x1 / width * 2.0 - 1.0, 1.0 - y1 / graph_height * 2.0];
@@ -1128,10 +1133,50 @@ impl State {
                     _pad: 0.0,
                 });
             }
+            self.graph.vertex_counts[s] = ((history.len() - 1) * 2) as u32;
         }
 
         self.queue
             .write_buffer(&self._buffers.graph_vertices, 0, bytemuck::cast_slice(&vertices));
+    }
+
+    fn graph_width_limit(&self) -> usize {
+        let graph_width = (self.size.width as f32 - 2.0 * GRAPH_PADDING_PX).max(2.0) as usize;
+        graph_width.min(GRAPH_MAX_POINTS)
+    }
+
+    fn add_graph_point(&mut self, series: usize, value: f32, width_limit: usize) {
+        self.graph.acc[series] += value;
+        self.graph.acc_count[series] += 1;
+        if self.graph.acc_count[series] < self.graph.scale[series] {
+            return;
+        }
+
+        let point = self.graph.acc[series] / self.graph.acc_count[series] as f32;
+        self.graph.acc[series] = 0.0;
+        self.graph.acc_count[series] = 0;
+        self.graph.history[series].push(point);
+        self.graph.series_max[series] = self.graph.series_max[series].max(point);
+
+        if self.graph.history[series].len() <= width_limit {
+            return;
+        }
+
+        if self.graph.scale[series] < GRAPH_MAX_SCALE {
+            let old = std::mem::take(&mut self.graph.history[series]);
+            let mut downsampled = Vec::with_capacity(old.len() / 2);
+            let mut i = 0usize;
+            while i + 1 < old.len() {
+                downsampled.push((old[i] + old[i + 1]) * 0.5);
+                i += 2;
+            }
+            self.graph.history[series] = downsampled;
+            self.graph.scale[series] *= 2;
+            return;
+        }
+
+        let overflow = self.graph.history[series].len() - width_limit;
+        self.graph.history[series].drain(0..overflow);
     }
 }
 
