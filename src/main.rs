@@ -1,5 +1,7 @@
 use bytemuck::{Pod, Zeroable};
+use egui_wgpu::ScreenDescriptor;
 use rand::Rng;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::{
     dpi::PhysicalSize,
@@ -31,6 +33,7 @@ const GRAPH_HEIGHT_PX: u32 = 200;
 const GRAPH_PADDING_PX: f32 = 16.0;
 const GRAPH_MAX_SCALE: u32 = 320;
 const GRAPH_MAX_POINTS: usize = 8192;
+const DEFAULT_MUTATION_DENOM: u32 = 1000;
 
 const FLAG_PREDATOR: u32 = 1 << 0;
 const FLAG_ALIVE: u32 = 1 << 1;
@@ -64,6 +67,8 @@ struct Params {
     max_velocity: f32,
     predator_speed_bonus: f32,
     predator_life_mult: f32,
+    prey_to_predator_mutation_denom: u32,
+    _pad_after_mutation: u32,
     grid_size: [u32; 2],
     capacity: u32,
     _pad: u32,
@@ -138,6 +143,47 @@ struct GraphState {
     vertex_counts: [u32; GRAPH_SERIES],
 }
 
+#[derive(Copy, Clone)]
+struct GraphHover {
+    prey: Option<f32>,
+    predators: Option<f32>,
+    x_ui: f32,
+    y_ui: f32,
+}
+
+#[derive(Clone)]
+struct FrameBreakdown {
+    compute_ms: f32,
+    sim_render_ms: f32,
+    graph_render_ms: f32,
+    ui_ms: f32,
+    readback_ms: f32,
+    submit_present_ms: f32,
+    total_ms: f32,
+}
+
+impl Default for FrameBreakdown {
+    fn default() -> Self {
+        Self {
+            compute_ms: 0.0,
+            sim_render_ms: 0.0,
+            graph_render_ms: 0.0,
+            ui_ms: 0.0,
+            readback_ms: 0.0,
+            submit_present_ms: 0.0,
+            total_ms: 0.0,
+        }
+    }
+}
+
+struct UiState {
+    egui_ctx: egui::Context,
+    egui_winit: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    fps_smoothed: f32,
+    timings: FrameBreakdown,
+}
+
 struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -150,6 +196,9 @@ struct State {
     _buffers: Buffers,
     bind_groups: BindGroups,
     graph: GraphState,
+    params_cpu: Params,
+    ui: UiState,
+    cursor_pos_px: Option<[f32; 2]>,
 }
 
 impl State {
@@ -157,9 +206,8 @@ impl State {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window).expect("surface");
-        let surface = unsafe {
-            std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(surface)
-        };
+        let surface =
+            unsafe { std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(surface) };
         let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -244,6 +292,8 @@ impl State {
             max_velocity: MAX_VELOCITY,
             predator_speed_bonus: PREDATOR_SPEED_BONUS,
             predator_life_mult: PREDATOR_LIFE_MULT,
+            prey_to_predator_mutation_denom: DEFAULT_MUTATION_DENOM,
+            _pad_after_mutation: 0,
             grid_size: [grid_x, grid_y],
             capacity: BOID_CAPACITY,
             _pad: 0,
@@ -614,7 +664,10 @@ impl State {
         let clear_grid = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("clear_grid_bg"),
             layout: &clear_bgl,
-            entries: &[bind_entry(0, &buffers.params), bind_entry(3, &buffers.grid_counts)],
+            entries: &[
+                bind_entry(0, &buffers.params),
+                bind_entry(3, &buffers.grid_counts),
+            ],
         });
         let scan = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scan_bg"),
@@ -813,6 +866,16 @@ impl State {
             render,
         };
 
+        let egui_ctx = egui::Context::default();
+        let egui_winit = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window,
+            Some(window.scale_factor() as f32),
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
+
         let mut state = Self {
             surface,
             device,
@@ -833,6 +896,15 @@ impl State {
                 series_max: [1.0; GRAPH_SERIES],
                 vertex_counts: [0u32; GRAPH_SERIES],
             },
+            params_cpu: params,
+            ui: UiState {
+                egui_ctx,
+                egui_winit,
+                egui_renderer,
+                fps_smoothed: 0.0,
+                timings: FrameBreakdown::default(),
+            },
+            cursor_pos_px: None,
         };
         state.update_graph_vertices();
         state
@@ -847,18 +919,152 @@ impl State {
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn handle_window_event(&mut self, window: &winit::window::Window, event: &WindowEvent) -> bool {
+        self.ui.egui_winit.on_window_event(window, event).consumed
+    }
+
+    fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
+        let frame_start = Instant::now();
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let ui_start = Instant::now();
+
+        let raw_input = self.ui.egui_winit.take_egui_input(window);
+        let timings = self.ui.timings.clone();
+        let fps = self.ui.fps_smoothed;
+        let hover_info = self.graph_hover(window.scale_factor() as f32);
+        let mut local_params = self.params_cpu;
+        let full_output = self.ui.egui_ctx.run(raw_input, |ctx| {
+            egui::Window::new("Sim Controls")
+                .default_pos([12.0, 12.0])
+                .show(ctx, |ui| {
+                    ui.label(format!("FPS: {:.1}", fps));
+                    ui.separator();
+                    ui.label("Simulation Parameters");
+                    ui.add(
+                        egui::Slider::new(&mut local_params.separation_coeff, 0.0..=10.0)
+                            .text("Separation"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.wall_factor, 0.0..=80.0)
+                            .text("Wall Force"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.predator_distance, 1.0..=40.0)
+                            .text("Predator Distance"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.predator_food_gain, 1.0..=120.0)
+                            .text("Predator Food Gain"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.prey_avoidance_bonus, 1.0..=30.0)
+                            .text("Prey Avoidance"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.predator_life_mult, 0.5..=3.0)
+                            .text("Predator Life Mult"),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut local_params.prey_to_predator_mutation_denom,
+                            100..=20_000,
+                        )
+                        .text("Mutation 1/N"),
+                    );
+
+                    ui.separator();
+                    ui.label("Frame Time Breakdown (ms)");
+                    let bars = [
+                        ("Compute", timings.compute_ms),
+                        ("Boid Render", timings.sim_render_ms),
+                        ("Graph Render", timings.graph_render_ms),
+                        ("UI", timings.ui_ms),
+                        ("Readback+Graph", timings.readback_ms),
+                        ("Submit+Present", timings.submit_present_ms),
+                    ];
+                    let max_bar = bars
+                        .iter()
+                        .fold(1.0f32, |acc, (_, v)| acc.max(*v))
+                        .max(timings.total_ms);
+                    for (label, value) in bars {
+                        let frac = (value / max_bar).clamp(0.0, 1.0);
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{label:>14}"));
+                            ui.add(
+                                egui::widgets::ProgressBar::new(frac)
+                                    .desired_width(210.0)
+                                    .text(format!("{value:.2} ms")),
+                            );
+                        });
+                    }
+                    ui.label(format!("Total: {:.2} ms", timings.total_ms));
+                });
+
+            if let Some(hover) = hover_info {
+                egui::Area::new(egui::Id::new("graph_hover_overlay"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(egui::pos2(hover.x_ui + 14.0, hover.y_ui - 52.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            let prey_text = hover
+                                .prey
+                                .map(|v| format!("{}", v.round() as u32))
+                                .unwrap_or_else(|| "-".to_string());
+                            let pred_text = hover
+                                .predators
+                                .map(|v| format!("{}", v.round() as u32))
+                                .unwrap_or_else(|| "-".to_string());
+                            ui.label(format!("Prey: {prey_text}"));
+                            ui.label(format!("Predators: {pred_text}"));
+                        });
+                    });
+            }
+        });
+
+        self.params_cpu = local_params;
+        self.queue.write_buffer(
+            &self._buffers.params,
+            0,
+            bytemuck::bytes_of(&self.params_cpu),
+        );
+
+        self.ui
+            .egui_winit
+            .handle_platform_output(window, full_output.platform_output);
+        let paint_jobs = self
+            .ui
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let screen_desc = ScreenDescriptor {
+            size_in_pixels: [self.size.width, self.size.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.ui
+                .egui_renderer
+                .update_texture(&self.device, &self.queue, *id, image_delta);
+        }
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("encoder"),
             });
+        self.ui.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_desc,
+        );
+        let ui_ms = ui_start.elapsed().as_secs_f32() * 1000.0;
 
+        let compute_start = Instant::now();
         self.run_compute_passes(&mut encoder);
+        let compute_ms = compute_start.elapsed().as_secs_f32() * 1000.0;
         let readback = self.graph.frame % GRAPH_READBACK_INTERVAL == 0;
         if readback {
             encoder.copy_buffer_to_buffer(
@@ -871,6 +1077,8 @@ impl State {
         }
         self.current = 1 - self.current;
 
+        let sim_render_ms: f32;
+        let mut graph_render_ms = 0.0f32;
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render_pass"),
@@ -898,9 +1106,11 @@ impl State {
                 1.0,
             );
             render_pass.set_scissor_rect(0, 0, self.size.width, boid_height);
+            let sim_start = Instant::now();
             render_pass.set_pipeline(&self.pipelines.render);
             render_pass.set_bind_group(0, &self.bind_groups.render[self.current], &[]);
             render_pass.draw(0..3, 0..BOID_CAPACITY);
+            sim_render_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
 
             if graph_height > 0 {
                 render_pass.set_viewport(
@@ -912,6 +1122,7 @@ impl State {
                     1.0,
                 );
                 render_pass.set_scissor_rect(0, boid_height, self.size.width, graph_height);
+                let graph_start = Instant::now();
                 render_pass.set_pipeline(&self.pipelines.graph);
                 render_pass.set_vertex_buffer(0, self._buffers.graph_vertices.slice(..));
                 let mut start = 0u32;
@@ -922,16 +1133,65 @@ impl State {
                     }
                     start += count;
                 }
+                graph_render_ms = graph_start.elapsed().as_secs_f32() * 1000.0;
             }
         }
 
+        {
+            let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.ui
+                .egui_renderer
+                .render(&mut ui_pass, &paint_jobs, &screen_desc);
+        }
+
+        for id in &full_output.textures_delta.free {
+            self.ui.egui_renderer.free_texture(id);
+        }
+
+        let submit_start = Instant::now();
         self.queue.submit(Some(encoder.finish()));
         output.present();
+        let submit_present_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+
+        let mut readback_ms = 0.0f32;
         if readback {
+            let readback_start = Instant::now();
             self.read_species_counts();
             self.update_graph_vertices();
+            readback_ms = readback_start.elapsed().as_secs_f32() * 1000.0;
         }
         self.graph.frame += 1;
+        let total_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        self.ui.timings = FrameBreakdown {
+            compute_ms,
+            sim_render_ms,
+            graph_render_ms,
+            ui_ms,
+            readback_ms,
+            submit_present_ms,
+            total_ms,
+        };
+        if total_ms > 0.0 {
+            let instant_fps = 1000.0 / total_ms;
+            self.ui.fps_smoothed = if self.ui.fps_smoothed <= 0.0 {
+                instant_fps
+            } else {
+                self.ui.fps_smoothed * 0.9 + instant_fps * 0.1
+            };
+        }
         Ok(())
     }
 
@@ -1136,8 +1396,11 @@ impl State {
             self.graph.vertex_counts[s] = ((history.len() - 1) * 2) as u32;
         }
 
-        self.queue
-            .write_buffer(&self._buffers.graph_vertices, 0, bytemuck::cast_slice(&vertices));
+        self.queue.write_buffer(
+            &self._buffers.graph_vertices,
+            0,
+            bytemuck::cast_slice(&vertices),
+        );
     }
 
     fn graph_width_limit(&self) -> usize {
@@ -1177,6 +1440,59 @@ impl State {
 
         let overflow = self.graph.history[series].len() - width_limit;
         self.graph.history[series].drain(0..overflow);
+    }
+
+    fn graph_hover(&self, pixels_per_point: f32) -> Option<GraphHover> {
+        let cursor = self.cursor_pos_px?;
+        let graph_height = GRAPH_HEIGHT_PX.min(self.size.height.saturating_sub(1)) as f32;
+        if graph_height <= 0.0 {
+            return None;
+        }
+        let boid_height = self.size.height as f32 - graph_height;
+        if cursor[1] < boid_height || cursor[1] > boid_height + graph_height {
+            return None;
+        }
+        if cursor[0] < 0.0 || cursor[0] > self.size.width as f32 {
+            return None;
+        }
+
+        let inner_x = GRAPH_PADDING_PX;
+        let inner_w = (self.size.width as f32 - 2.0 * GRAPH_PADDING_PX).max(1.0);
+        let local_x = cursor[0];
+
+        let prey = Self::sample_history_at_x(&self.graph.history[0], local_x, inner_x, inner_w);
+        let predators =
+            Self::sample_history_at_x(&self.graph.history[1], local_x, inner_x, inner_w);
+        if prey.is_none() && predators.is_none() {
+            return None;
+        }
+
+        Some(GraphHover {
+            prey,
+            predators,
+            x_ui: cursor[0] / pixels_per_point,
+            y_ui: cursor[1] / pixels_per_point,
+        })
+    }
+
+    fn sample_history_at_x(
+        history: &[f32],
+        local_x: f32,
+        inner_x: f32,
+        inner_w: f32,
+    ) -> Option<f32> {
+        if history.is_empty() {
+            return None;
+        }
+        let len = history.len() as f32;
+        let first_x = inner_x + (inner_w - len).max(0.0);
+        let last_x = first_x + (len - 1.0).max(0.0);
+        if local_x < first_x || local_x > last_x {
+            return None;
+        }
+
+        let idx = (local_x - first_x).round() as usize;
+        history.get(idx.min(history.len() - 1)).copied()
     }
 }
 
@@ -1339,11 +1655,7 @@ fn create_initial_boids() -> Vec<Boid> {
     let mut boids = Vec::with_capacity(BOID_CAPACITY as usize);
     for i in 0..INITIAL_COUNT {
         let predator = i < predator_count;
-        let species = if predator {
-            0
-        } else {
-            rng.gen_range(0..5)
-        };
+        let species = if predator { 0 } else { rng.gen_range(0..5) };
         let flags = FLAG_ALIVE | if predator { FLAG_PREDATOR } else { 0 };
         let life = if predator {
             START_LIFE * PREDATOR_LIFE_MULT
@@ -1351,7 +1663,10 @@ fn create_initial_boids() -> Vec<Boid> {
             START_LIFE
         };
         boids.push(Boid {
-            pos: [rng.gen_range(0.0..WORLD_SIZE[0]), rng.gen_range(0.0..WORLD_SIZE[1])],
+            pos: [
+                rng.gen_range(0.0..WORLD_SIZE[0]),
+                rng.gen_range(0.0..WORLD_SIZE[1]),
+            ],
             vel: [
                 (rng.gen_range(-0.5..0.5)) * 10.0,
                 (rng.gen_range(-0.5..0.5)) * 10.0,
@@ -1398,29 +1713,38 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
         .run(move |event, target| match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => target.exit(),
-                WindowEvent::Resized(size) => state.resize(size),
-                WindowEvent::ScaleFactorChanged {
-                    mut inner_size_writer,
-                    ..
-                } => {
-                    let size = window.inner_size();
-                    let _ = inner_size_writer.request_inner_size(size);
-                    state.resize(size);
-                }
-                WindowEvent::RedrawRequested => {
-                    if let Err(err) = state.render() {
-                        match err {
-                            wgpu::SurfaceError::Lost => state.resize(state.size),
-                            wgpu::SurfaceError::OutOfMemory => target.exit(),
-                            wgpu::SurfaceError::Outdated => {}
-                            wgpu::SurfaceError::Timeout => {}
+            Event::WindowEvent { event, .. } => {
+                let _consumed = state.handle_window_event(&window, &event);
+                match event {
+                    WindowEvent::CloseRequested => target.exit(),
+                    WindowEvent::Resized(size) => state.resize(size),
+                    WindowEvent::CursorMoved { position, .. } => {
+                        state.cursor_pos_px = Some([position.x as f32, position.y as f32]);
+                    }
+                    WindowEvent::CursorLeft { .. } => {
+                        state.cursor_pos_px = None;
+                    }
+                    WindowEvent::ScaleFactorChanged {
+                        mut inner_size_writer,
+                        ..
+                    } => {
+                        let size = window.inner_size();
+                        let _ = inner_size_writer.request_inner_size(size);
+                        state.resize(size);
+                    }
+                    WindowEvent::RedrawRequested => {
+                        if let Err(err) = state.render(&window) {
+                            match err {
+                                wgpu::SurfaceError::Lost => state.resize(state.size),
+                                wgpu::SurfaceError::OutOfMemory => target.exit(),
+                                wgpu::SurfaceError::Outdated => {}
+                                wgpu::SurfaceError::Timeout => {}
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Event::AboutToWait => {
                 window.request_redraw();
             }

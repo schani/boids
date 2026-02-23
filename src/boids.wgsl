@@ -2,7 +2,6 @@ const FLAG_PREDATOR: u32 = 1u;
 const FLAG_ALIVE: u32 = 2u;
 
 const WORKGROUP_SIZE: u32 = 256u;
-const PREY_TO_PREDATOR_MUTATION_DENOM: u32 = 1000u;
 
 struct Boid {
   pos: vec2<f32>,
@@ -27,6 +26,8 @@ struct Params {
   max_velocity: f32,
   predator_speed_bonus: f32,
   predator_life_mult: f32,
+  prey_to_predator_mutation_denom: u32,
+  _pad_after_mutation: u32,
   grid_size: vec2<u32>,
   capacity: u32,
   _pad: u32,
@@ -316,7 +317,8 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
         bitcast<u32>(b.pos.x) ^ bitcast<u32>(b.pos.y) ^
         bitcast<u32>(b.vel.x) ^ bitcast<u32>(b.vel.y) ^
         bitcast<u32>(half_life);
-      if ((hash_u32(seed) % PREY_TO_PREDATOR_MUTATION_DENOM) == 0u) {
+      let denom = max(1u, params.prey_to_predator_mutation_denom);
+      if ((hash_u32(seed) % denom) == 0u) {
         child_flags = (child_flags | FLAG_PREDATOR);
         child_species = 0u;
       }
