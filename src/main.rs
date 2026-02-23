@@ -8,9 +8,9 @@ use winit::{
     window::WindowBuilder,
 };
 
-const WORLD_SIZE: [f32; 2] = [2000.0, 2000.0];
+const WORLD_SIZE: [f32; 2] = [4000.0, 4000.0];
 const BOID_CAPACITY: u32 = 50_000;
-const INITIAL_COUNT: u32 = 2_000;
+const INITIAL_COUNT: u32 = 8_000;
 const PREDATOR_RATIO: f32 = 0.005; // 0.5%
 
 const START_LIFE: f32 = 300.0;
@@ -26,7 +26,7 @@ const PREDATOR_LIFE_MULT: f32 = 1.5;
 const RADIUS: f32 = 100.0;
 
 const GRAPH_SAMPLES: usize = 240;
-const GRAPH_SERIES: usize = 6; // 5 prey species + predators
+const GRAPH_SERIES: usize = 2; // combined prey + predators
 const GRAPH_READBACK_INTERVAL: u32 = 4;
 const GRAPH_HEIGHT_PX: u32 = 200;
 const GRAPH_PADDING_PX: f32 = 16.0;
@@ -1093,13 +1093,10 @@ impl State {
             max_counts[s] = self.graph.series_max[s].max(1);
         }
 
+        // Match the original graph behavior: one prey line and one predator line.
         let colors: [[f32; 3]; GRAPH_SERIES] = [
-            [0.639, 0.659, 0.310],
-            [1.0, 0.443, 0.553],
-            [0.161, 0.804, 1.0],
-            [0.259, 0.898, 0.878],
-            [0.478, 0.475, 1.0],
-            [1.0, 0.267, 0.267],
+            [0.0, 0.0, 1.0], // prey
+            [1.0, 0.0, 0.0], // predators
         ];
 
         let mut vertices = Vec::with_capacity(GRAPH_SERIES * (GRAPH_SAMPLES - 1) * 2);

@@ -2,6 +2,7 @@ const FLAG_PREDATOR: u32 = 1u;
 const FLAG_ALIVE: u32 = 2u;
 
 const WORKGROUP_SIZE: u32 = 256u;
+const PREY_TO_PREDATOR_MUTATION_DENOM: u32 = 1000u;
 
 struct Boid {
   pos: vec2<f32>,
@@ -58,6 +59,16 @@ fn clamp_cell(coord: i32, max_val: i32) -> u32 {
   if (coord < 0) { return 0u; }
   if (coord > max_val) { return u32(max_val); }
   return u32(coord);
+}
+
+fn hash_u32(x: u32) -> u32 {
+  var h = x;
+  h = (h ^ 61u) ^ (h >> 16u);
+  h = h * 9u;
+  h = h ^ (h >> 4u);
+  h = h * 0x27d4eb2du;
+  h = h ^ (h >> 15u);
+  return h;
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -297,12 +308,25 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let slot = atomicAdd(&spawn_count, 1u);
   if (slot < params.capacity) {
+    var child_species = b.species;
+    var child_flags = b.flags;
+    if ((b.flags & FLAG_PREDATOR) == 0u) {
+      let seed =
+        idx ^ slot ^
+        bitcast<u32>(b.pos.x) ^ bitcast<u32>(b.pos.y) ^
+        bitcast<u32>(b.vel.x) ^ bitcast<u32>(b.vel.y) ^
+        bitcast<u32>(half_life);
+      if ((hash_u32(seed) % PREY_TO_PREDATOR_MUTATION_DENOM) == 0u) {
+        child_flags = (child_flags | FLAG_PREDATOR);
+        child_species = 0u;
+      }
+    }
     spawn_list[slot] = Boid(
       b.pos + vec2(3.0, 3.0),
       b.vel,
       half_life,
-      b.species,
-      b.flags,
+      child_species,
+      child_flags,
       0u
     );
   }
@@ -337,7 +361,7 @@ fn merge_dead(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(32)
 fn clear_species_counts(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x < 6u) {
+  if (gid.x < 2u) {
     atomicStore(&species_counts[gid.x], 0u);
   }
 }
@@ -350,10 +374,9 @@ fn count_species(@builtin(global_invocation_id) gid: vec3<u32>) {
   if ((b.flags & FLAG_ALIVE) == 0u) { return; }
 
   if ((b.flags & FLAG_PREDATOR) != 0u) {
-    atomicAdd(&species_counts[5u], 1u);
+    atomicAdd(&species_counts[1u], 1u);
   } else {
-    let s = b.species % 5u;
-    atomicAdd(&species_counts[s], 1u);
+    atomicAdd(&species_counts[0u], 1u);
   }
 }
 
