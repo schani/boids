@@ -11,7 +11,7 @@ use winit::{
 };
 
 const WORLD_SIZE: [f32; 2] = [8000.0, 8000.0];
-const BOID_CAPACITY: u32 = 50_000;
+const BOID_CAPACITY: u32 = 75_000;
 const INITIAL_COUNT: u32 = 32_000;
 const PREDATOR_RATIO: f32 = 0.005; // 0.5%
 
@@ -1896,7 +1896,7 @@ fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     let window = WindowBuilder::new()
         .with_title("Boids GPU (wgpu)")
-        .with_inner_size(PhysicalSize::new(1000, 1000))
+        .with_inner_size(PhysicalSize::new(2000, 2000))
         .build(&event_loop)
         .expect("window");
 
