@@ -40,6 +40,7 @@ struct Params {
   predator_speed_bonus: f32,
   prey_to_predator_mutation_denom: u32,
   _pad_after_mutation: u32,
+  _pad_before_grid: u32,
   grid_size: vec2<u32>,
   capacity: u32,
   _pad: u32,
