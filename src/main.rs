@@ -24,7 +24,6 @@ const PREDATOR_FOOD_GAIN: f32 = 30.0;
 const PREY_AVOIDANCE_BONUS: f32 = 10.0;
 const MAX_VELOCITY: f32 = 5.0;
 const PREDATOR_SPEED_BONUS: f32 = 1.9;
-const PREDATOR_LIFE_MULT: f32 = 1.5;
 const RADIUS: f32 = 100.0;
 
 const GRAPH_SERIES: usize = 2; // combined prey + predators
@@ -75,7 +74,6 @@ struct Params {
     prey_avoidance_bonus: f32,
     max_velocity: f32,
     predator_speed_bonus: f32,
-    predator_life_mult: f32,
     prey_to_predator_mutation_denom: u32,
     _pad_after_mutation: u32,
     grid_size: [u32; 2],
@@ -338,7 +336,6 @@ impl State {
             prey_avoidance_bonus: PREY_AVOIDANCE_BONUS,
             max_velocity: MAX_VELOCITY,
             predator_speed_bonus: PREDATOR_SPEED_BONUS,
-            predator_life_mult: PREDATOR_LIFE_MULT,
             prey_to_predator_mutation_denom: DEFAULT_MUTATION_DENOM,
             _pad_after_mutation: 0,
             grid_size: [grid_x, grid_y],
@@ -1070,10 +1067,6 @@ impl State {
                     ui.add(
                         egui::Slider::new(&mut local_params.prey_avoidance_bonus, 1.0..=30.0)
                             .text("Prey Avoidance"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut local_params.predator_life_mult, 0.5..=3.0)
-                            .text("Predator Life Mult"),
                     );
                     ui.add(
                         egui::Slider::new(
@@ -1852,11 +1845,7 @@ fn create_initial_boids() -> Vec<Boid> {
         let predator = i < predator_count;
         let species = if predator { 0 } else { rng.gen_range(0..5) };
         let flags = FLAG_ALIVE | if predator { FLAG_PREDATOR } else { 0 };
-        let life = if predator {
-            START_LIFE * PREDATOR_LIFE_MULT
-        } else {
-            START_LIFE
-        };
+        let life = START_LIFE;
         boids.push(Boid {
             pos: [
                 rng.gen_range(0.0..WORLD_SIZE[0]),

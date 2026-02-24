@@ -38,7 +38,6 @@ struct Params {
   prey_avoidance_bonus: f32,
   max_velocity: f32,
   predator_speed_bonus: f32,
-  predator_life_mult: f32,
   prey_to_predator_mutation_denom: u32,
   _pad_after_mutation: u32,
   grid_size: vec2<u32>,
@@ -333,11 +332,7 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (idx >= params.capacity) { return; }
   let b = boid_out[idx];
   if ((b.flags & FLAG_ALIVE) == 0u) { return; }
-  let threshold = select(
-    params.start_life * 2.0,
-    params.start_life * 2.0 * params.predator_life_mult,
-    (b.flags & FLAG_PREDATOR) != 0u
-  );
+  let threshold = params.start_life * 2.0;
   if (b.life <= threshold) { return; }
 
   let half_life = b.life * 0.5;
