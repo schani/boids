@@ -75,8 +75,8 @@ struct Params {
     max_velocity: f32,
     predator_speed_bonus: f32,
     prey_to_predator_mutation_denom: u32,
-    _pad_after_mutation: u32,
-    _pad_before_grid: u32,
+    loneliness_enabled: u32,
+    overcrowding_enabled: u32,
     grid_size: [u32; 2],
     capacity: u32,
     _pad: u32,
@@ -338,8 +338,8 @@ impl State {
             max_velocity: MAX_VELOCITY,
             predator_speed_bonus: PREDATOR_SPEED_BONUS,
             prey_to_predator_mutation_denom: DEFAULT_MUTATION_DENOM,
-            _pad_after_mutation: 0,
-            _pad_before_grid: 0,
+            loneliness_enabled: 0,
+            overcrowding_enabled: 0,
             grid_size: [grid_x, grid_y],
             capacity: BOID_CAPACITY,
             _pad: 0,
@@ -1077,6 +1077,12 @@ impl State {
                         )
                         .text("Mutation 1/N"),
                     );
+                    let mut loneliness_enabled = local_params.loneliness_enabled != 0;
+                    ui.checkbox(&mut loneliness_enabled, "Loneliness Enabled");
+                    local_params.loneliness_enabled = u32::from(loneliness_enabled);
+                    let mut overcrowding_enabled = local_params.overcrowding_enabled != 0;
+                    ui.checkbox(&mut overcrowding_enabled, "Overcrowding Enabled");
+                    local_params.overcrowding_enabled = u32::from(overcrowding_enabled);
 
                     ui.separator();
                     ui.label("Frame Time Breakdown (ms)");

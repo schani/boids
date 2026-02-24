@@ -39,8 +39,8 @@ struct Params {
   max_velocity: f32,
   predator_speed_bonus: f32,
   prey_to_predator_mutation_denom: u32,
-  _pad_after_mutation: u32,
-  _pad_before_grid: u32,
+  loneliness_enabled: u32,
+  overcrowding_enabled: u32,
   grid_size: vec2<u32>,
   capacity: u32,
   _pad: u32,
@@ -287,6 +287,8 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   var alive_out = true;
   var death_reason = DEATH_NONE;
   var last_depletion_reason = b._pad;
+  let loneliness_active = params.loneliness_enabled != 0u;
+  let overcrowding_active = params.overcrowding_enabled != 0u;
   if (predator) {
     next_life = next_life - 1.0 + f32(num_prey_eaten) * params.predator_food_gain;
     last_depletion_reason = DEATH_PREDATOR_STARVATION;
@@ -294,13 +296,13 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (was_eaten) {
       alive_out = false;
       death_reason = DEATH_PREY_EATEN;
-    } else if (num_friends < 5u) {
+    } else if (num_friends < 5u && loneliness_active) {
       next_life = next_life - 1.0;
       last_depletion_reason = DEATH_PREY_LONELINESS;
-    } else if (num_friends >= 20u) {
+    } else if (num_friends >= 20u && overcrowding_active) {
       next_life = next_life - 1.0;
       last_depletion_reason = DEATH_PREY_OVERCROWDING;
-    } else {
+    } else if (num_friends >= 5u && num_friends < 20u) {
       next_life = next_life + 1.0;
     }
   }
