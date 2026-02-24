@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::ScreenDescriptor;
 use rand::Rng;
-use std::time::Instant;
+use std::{collections::VecDeque, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
     dpi::PhysicalSize,
@@ -34,6 +34,15 @@ const GRAPH_PADDING_PX: f32 = 16.0;
 const GRAPH_MAX_SCALE: u32 = 320;
 const GRAPH_MAX_POINTS: usize = 8192;
 const DEFAULT_MUTATION_DENOM: u32 = 1000;
+const CAUSE_COUNT: usize = 7;
+const CAUSE_WINDOW_FRAMES: usize = 60;
+const CAUSE_REPRODUCTION_SPLIT: usize = 0;
+const CAUSE_PREY_TO_PREDATOR_MUTATION: usize = 1;
+const CAUSE_BIRTH_DROPPED: usize = 2;
+const CAUSE_PREY_EATEN: usize = 3;
+const CAUSE_PREY_LONELINESS: usize = 4;
+const CAUSE_PREY_OVERCROWDING: usize = 5;
+const CAUSE_PREDATOR_STARVATION: usize = 6;
 
 const FLAG_PREDATOR: u32 = 1 << 0;
 const FLAG_ALIVE: u32 = 1 << 1;
@@ -106,6 +115,8 @@ struct Buffers {
     spawn_count: wgpu::Buffer,
     species_counts: wgpu::Buffer,
     species_counts_read: wgpu::Buffer,
+    cause_counts: wgpu::Buffer,
+    cause_counts_read: wgpu::Buffer,
     graph_vertices: wgpu::Buffer,
 }
 
@@ -141,6 +152,41 @@ struct GraphState {
     frame: u32,
     series_max: [f32; GRAPH_SERIES],
     vertex_counts: [u32; GRAPH_SERIES],
+}
+
+struct CauseState {
+    history: VecDeque<[u32; CAUSE_COUNT]>,
+    sums: [u64; CAUSE_COUNT],
+    all_time_max: u64,
+}
+
+impl CauseState {
+    fn push_frame(&mut self, frame: [u32; CAUSE_COUNT]) {
+        if self.history.len() == CAUSE_WINDOW_FRAMES {
+            if let Some(oldest) = self.history.pop_front() {
+                for i in 0..CAUSE_COUNT {
+                    self.sums[i] = self.sums[i].saturating_sub(oldest[i] as u64);
+                }
+            }
+        }
+
+        self.history.push_back(frame);
+        for i in 0..CAUSE_COUNT {
+            self.sums[i] += frame[i] as u64;
+        }
+        let frame_peak = self.sums.iter().copied().max().unwrap_or(0);
+        self.all_time_max = self.all_time_max.max(frame_peak);
+    }
+}
+
+impl Default for CauseState {
+    fn default() -> Self {
+        Self {
+            history: VecDeque::with_capacity(CAUSE_WINDOW_FRAMES),
+            sums: [0; CAUSE_COUNT],
+            all_time_max: 1,
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -196,6 +242,7 @@ struct State {
     _buffers: Buffers,
     bind_groups: BindGroups,
     graph: GraphState,
+    causes: CauseState,
     params_cpu: Params,
     ui: UiState,
     cursor_pos_px: Option<[f32; 2]>,
@@ -405,6 +452,20 @@ impl State {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let cause_counts = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cause_counts"),
+            size: (CAUSE_COUNT as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cause_counts_read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cause_counts_read"),
+            size: (CAUSE_COUNT as u64) * 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let graph_vertex_capacity =
             (GRAPH_SERIES as u64) * ((GRAPH_MAX_POINTS as u64 - 1) * 2) as u64;
@@ -424,6 +485,7 @@ impl State {
         );
         queue.write_buffer(&dead_new_count, 0, bytemuck::bytes_of(&0u32));
         queue.write_buffer(&spawn_count, 0, bytemuck::bytes_of(&0u32));
+        queue.write_buffer(&cause_counts, 0, bytemuck::cast_slice(&[0u32; CAUSE_COUNT]));
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("boids.wgsl"),
@@ -435,6 +497,7 @@ impl State {
             entries: &[
                 storage_entry(10, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(12, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(14, false, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let clear_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -497,6 +560,7 @@ impl State {
                 storage_entry(2, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(11, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(12, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(14, false, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let apply_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -508,6 +572,7 @@ impl State {
                 storage_entry(8, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(11, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(12, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(14, false, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let merge_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -517,6 +582,7 @@ impl State {
                 storage_entry(10, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(7, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(8, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(14, false, wgpu::ShaderStages::COMPUTE),
             ],
         });
 
@@ -650,6 +716,8 @@ impl State {
             spawn_count,
             species_counts,
             species_counts_read,
+            cause_counts,
+            cause_counts_read,
             graph_vertices,
         };
 
@@ -659,6 +727,7 @@ impl State {
             entries: &[
                 bind_entry(10, &buffers.dead_new_count),
                 bind_entry(12, &buffers.spawn_count),
+                bind_entry(14, &buffers.cause_counts),
             ],
         });
         let clear_grid = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -695,6 +764,7 @@ impl State {
                 bind_entry(10, &buffers.dead_new_count),
                 bind_entry(7, &buffers.dead_free),
                 bind_entry(8, &buffers.dead_free_count),
+                bind_entry(14, &buffers.cause_counts),
             ],
         });
         let clear_species = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -784,6 +854,7 @@ impl State {
                     bind_entry(2, &buffers.boids[0]),
                     bind_entry(11, &buffers.spawn_list),
                     bind_entry(12, &buffers.spawn_count),
+                    bind_entry(14, &buffers.cause_counts),
                 ],
             }),
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -794,6 +865,7 @@ impl State {
                     bind_entry(2, &buffers.boids[1]),
                     bind_entry(11, &buffers.spawn_list),
                     bind_entry(12, &buffers.spawn_count),
+                    bind_entry(14, &buffers.cause_counts),
                 ],
             }),
         ];
@@ -808,6 +880,7 @@ impl State {
                     bind_entry(8, &buffers.dead_free_count),
                     bind_entry(11, &buffers.spawn_list),
                     bind_entry(12, &buffers.spawn_count),
+                    bind_entry(14, &buffers.cause_counts),
                 ],
             }),
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -820,6 +893,7 @@ impl State {
                     bind_entry(8, &buffers.dead_free_count),
                     bind_entry(11, &buffers.spawn_list),
                     bind_entry(12, &buffers.spawn_count),
+                    bind_entry(14, &buffers.cause_counts),
                 ],
             }),
         ];
@@ -896,6 +970,7 @@ impl State {
                 series_max: [1.0; GRAPH_SERIES],
                 vertex_counts: [0u32; GRAPH_SERIES],
             },
+            causes: CauseState::default(),
             params_cpu: params,
             ui: UiState {
                 egui_ctx,
@@ -935,10 +1010,43 @@ impl State {
         let timings = self.ui.timings.clone();
         let fps = self.ui.fps_smoothed;
         let hover_info = self.graph_hover(window.scale_factor() as f32);
+        let cause_frame_count = self.causes.history.len();
+        let cause_sums = self.causes.sums;
+        let cause_all_time_max = self.causes.all_time_max.max(1) as f32;
+        let cause_bars = [
+            (
+                "Births: Reproduction Split",
+                cause_sums[CAUSE_REPRODUCTION_SPLIT],
+            ),
+            (
+                "Births: Prey->Predator Mutation",
+                cause_sums[CAUSE_PREY_TO_PREDATOR_MUTATION],
+            ),
+            ("Births: Dropped (No Slot)", cause_sums[CAUSE_BIRTH_DROPPED]),
+            ("Deaths: Prey Eaten", cause_sums[CAUSE_PREY_EATEN]),
+            ("Deaths: Prey Loneliness", cause_sums[CAUSE_PREY_LONELINESS]),
+            (
+                "Deaths: Prey Overcrowding",
+                cause_sums[CAUSE_PREY_OVERCROWDING],
+            ),
+            (
+                "Deaths: Predator Starvation",
+                cause_sums[CAUSE_PREDATOR_STARVATION],
+            ),
+        ];
+        let overlay_margin = 12.0f32;
+        let overlay_spacing = 8.0f32;
+        let collapsed_height = 28.0f32;
+        let viewport_height = self.size.height.max(1) as f32;
+        let causes_default_y =
+            (viewport_height - overlay_margin - collapsed_height).max(overlay_margin);
+        let sim_default_y =
+            (causes_default_y - overlay_spacing - collapsed_height).max(overlay_margin);
         let mut local_params = self.params_cpu;
         let full_output = self.ui.egui_ctx.run(raw_input, |ctx| {
             egui::Window::new("Sim Controls")
-                .default_pos([12.0, 12.0])
+                .default_pos([overlay_margin, sim_default_y])
+                .default_open(false)
                 .show(ctx, |ui| {
                     ui.label(format!("FPS: {:.1}", fps));
                     ui.separator();
@@ -1003,12 +1111,70 @@ impl State {
                     ui.label(format!("Total: {:.2} ms", timings.total_ms));
                 });
 
+            egui::Window::new("Birth/Death Causes")
+                .default_pos([overlay_margin, causes_default_y])
+                .default_open(false)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Rolling sum over last {} frames (target 60 ~ 1s), scaled to all-time peak",
+                        cause_frame_count
+                    ));
+                    ui.separator();
+                    let label_width = 270.0f32;
+                    let row_spacing = ui.spacing().item_spacing.x;
+                    let bar_width = (ui.available_width() - label_width - row_spacing).max(140.0);
+                    for (label, value) in cause_bars {
+                        let frac = (value as f32 / cause_all_time_max).clamp(0.0, 1.0);
+                        ui.horizontal(|ui| {
+                            ui.add_sized([label_width, 0.0], egui::Label::new(label).wrap(false));
+                            let bar_response = ui.add(
+                                egui::widgets::ProgressBar::new(frac)
+                                    .desired_width(bar_width)
+                                    .text(""),
+                            );
+                            let text_pos = egui::pos2(
+                                bar_response.rect.right() - 8.0,
+                                bar_response.rect.center().y,
+                            );
+                            ui.painter().text(
+                                text_pos,
+                                egui::Align2::RIGHT_CENTER,
+                                value.to_string(),
+                                egui::TextStyle::Body.resolve(ui.style()),
+                                egui::Color32::WHITE,
+                            );
+                        });
+                    }
+                });
+
             if let Some(hover) = hover_info {
+                let screen = ctx.input(|i| i.screen_rect());
+                let overlay_size = egui::vec2(150.0, 66.0);
+                let margin = 8.0;
+                let edge_offset = 14.0;
+
+                let mut overlay_pos = egui::pos2(hover.x_ui + edge_offset, hover.y_ui - 52.0);
+                if overlay_pos.x + overlay_size.x > screen.right() - margin {
+                    overlay_pos.x = hover.x_ui - overlay_size.x - edge_offset;
+                }
+                if overlay_pos.y < screen.top() + margin {
+                    overlay_pos.y = hover.y_ui + edge_offset;
+                }
+                overlay_pos.x = overlay_pos.x.clamp(
+                    screen.left() + margin,
+                    screen.right() - overlay_size.x - margin,
+                );
+                overlay_pos.y = overlay_pos.y.clamp(
+                    screen.top() + margin,
+                    screen.bottom() - overlay_size.y - margin,
+                );
+
                 egui::Area::new(egui::Id::new("graph_hover_overlay"))
                     .order(egui::Order::Foreground)
-                    .fixed_pos(egui::pos2(hover.x_ui + 14.0, hover.y_ui - 52.0))
+                    .fixed_pos(overlay_pos)
                     .show(ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(140.0);
                             let prey_text = hover
                                 .prey
                                 .map(|v| format!("{}", v.round() as u32))
@@ -1017,8 +1183,8 @@ impl State {
                                 .predators
                                 .map(|v| format!("{}", v.round() as u32))
                                 .unwrap_or_else(|| "-".to_string());
-                            ui.label(format!("Prey: {prey_text}"));
-                            ui.label(format!("Predators: {pred_text}"));
+                            ui.add(egui::Label::new(format!("Prey: {prey_text}")).wrap(false));
+                            ui.add(egui::Label::new(format!("Predators: {pred_text}")).wrap(false));
                         });
                     });
             }
@@ -1065,6 +1231,13 @@ impl State {
         let compute_start = Instant::now();
         self.run_compute_passes(&mut encoder);
         let compute_ms = compute_start.elapsed().as_secs_f32() * 1000.0;
+        encoder.copy_buffer_to_buffer(
+            &self._buffers.cause_counts,
+            0,
+            &self._buffers.cause_counts_read,
+            0,
+            (CAUSE_COUNT as u64) * 4,
+        );
         let readback = self.graph.frame % GRAPH_READBACK_INTERVAL == 0;
         if readback {
             encoder.copy_buffer_to_buffer(
@@ -1166,13 +1339,15 @@ impl State {
         output.present();
         let submit_present_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
 
-        let mut readback_ms = 0.0f32;
-        if readback {
+        let readback_ms = {
             let readback_start = Instant::now();
-            self.read_species_counts();
-            self.update_graph_vertices();
-            readback_ms = readback_start.elapsed().as_secs_f32() * 1000.0;
-        }
+            self.read_cause_counts();
+            if readback {
+                self.read_species_counts();
+                self.update_graph_vertices();
+            }
+            readback_start.elapsed().as_secs_f32() * 1000.0
+        };
         self.graph.frame += 1;
         let total_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         self.ui.timings = FrameBreakdown {
@@ -1319,6 +1494,26 @@ impl State {
             pass.set_pipeline(&self.pipelines.merge_dead);
             pass.set_bind_group(0, &self.bind_groups.merge_dead, &[]);
             pass.dispatch_workgroups(boid_dispatch, 1, 1);
+        }
+    }
+
+    fn read_cause_counts(&mut self) {
+        let slice = self._buffers.cause_counts_read.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = sender.send(v);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        if let Ok(Ok(())) = receiver.recv() {
+            let data = slice.get_mapped_range();
+            let counts_src: &[u32] = bytemuck::cast_slice(&data);
+            let mut counts = [0u32; CAUSE_COUNT];
+            if counts_src.len() >= CAUSE_COUNT {
+                counts.copy_from_slice(&counts_src[..CAUSE_COUNT]);
+            }
+            drop(data);
+            self._buffers.cause_counts_read.unmap();
+            self.causes.push_frame(counts);
         }
     }
 

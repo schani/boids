@@ -2,6 +2,19 @@ const FLAG_PREDATOR: u32 = 1u;
 const FLAG_ALIVE: u32 = 2u;
 
 const WORKGROUP_SIZE: u32 = 256u;
+const CAUSE_REPRODUCTION_SPLIT: u32 = 0u;
+const CAUSE_PREY_TO_PREDATOR_MUTATION: u32 = 1u;
+const CAUSE_BIRTH_DROPPED: u32 = 2u;
+const CAUSE_PREY_EATEN: u32 = 3u;
+const CAUSE_PREY_LONELINESS: u32 = 4u;
+const CAUSE_PREY_OVERCROWDING: u32 = 5u;
+const CAUSE_PREDATOR_STARVATION: u32 = 6u;
+const DEATH_NONE: u32 = 0u;
+const DEATH_PREY_EATEN: u32 = 1u;
+const DEATH_PREY_LONELINESS: u32 = 2u;
+const DEATH_PREY_OVERCROWDING: u32 = 3u;
+const DEATH_PREDATOR_STARVATION: u32 = 4u;
+const MUTATION_FLAG: u32 = 0x80000000u;
 
 struct Boid {
   pos: vec2<f32>,
@@ -47,6 +60,7 @@ struct Params {
 @group(0) @binding(11) var<storage, read_write> spawn_list: array<Boid>;
 @group(0) @binding(12) var<storage, read_write> spawn_count: atomic<u32>;
 @group(0) @binding(13) var<storage, read_write> species_counts: array<atomic<u32>>;
+@group(0) @binding(14) var<storage, read_write> cause_counts: array<atomic<u32>>;
 
 fn normalize_or_zero(v: vec2<f32>) -> vec2<f32> {
   let len = length(v);
@@ -77,6 +91,13 @@ fn reset_dead_new(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x == 0u) {
     atomicStore(&dead_new_count, 0u);
     atomicStore(&spawn_count, 0u);
+    atomicStore(&cause_counts[CAUSE_REPRODUCTION_SPLIT], 0u);
+    atomicStore(&cause_counts[CAUSE_PREY_TO_PREDATOR_MUTATION], 0u);
+    atomicStore(&cause_counts[CAUSE_BIRTH_DROPPED], 0u);
+    atomicStore(&cause_counts[CAUSE_PREY_EATEN], 0u);
+    atomicStore(&cause_counts[CAUSE_PREY_LONELINESS], 0u);
+    atomicStore(&cause_counts[CAUSE_PREY_OVERCROWDING], 0u);
+    atomicStore(&cause_counts[CAUSE_PREDATOR_STARVATION], 0u);
   }
 }
 
@@ -264,31 +285,46 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var next_life = b.life;
   var alive_out = true;
+  var death_reason = DEATH_NONE;
+  var last_depletion_reason = b._pad;
   if (predator) {
     next_life = next_life - 1.0 + f32(num_prey_eaten) * params.predator_food_gain;
+    last_depletion_reason = DEATH_PREDATOR_STARVATION;
   } else {
     if (was_eaten) {
       alive_out = false;
-    } else if (num_friends < 5u || num_friends > 19u) {
+      death_reason = DEATH_PREY_EATEN;
+    } else if (num_friends < 5u) {
       next_life = next_life - 1.0;
+      last_depletion_reason = DEATH_PREY_LONELINESS;
+    } else if (num_friends >= 20u) {
+      next_life = next_life - 1.0;
+      last_depletion_reason = DEATH_PREY_OVERCROWDING;
     } else {
       next_life = next_life + 1.0;
     }
   }
 
-  if (next_life <= 0.0) {
+  if (alive_out && next_life <= 0.0) {
     alive_out = false;
+    if (death_reason == DEATH_NONE) {
+      death_reason = select(last_depletion_reason, DEATH_PREDATOR_STARVATION, predator);
+      if (death_reason == DEATH_NONE) {
+        death_reason = DEATH_PREY_LONELINESS;
+      }
+    }
   }
 
   var out_flags = b.flags;
   if (!alive_out) {
     out_flags = out_flags & ~FLAG_ALIVE;
     let slot = atomicAdd(&dead_new_count, 1u);
-    dead_new[slot] = idx;
+    dead_new[slot] = (idx & 0x00ffffffu) | (death_reason << 24u);
   }
 
   let next_pos = b.pos + next_vel;
-  boid_out[idx] = Boid(next_pos, next_vel, next_life, b.species, out_flags, 0u);
+  let out_pad = select(0u, last_depletion_reason, alive_out);
+  boid_out[idx] = Boid(next_pos, next_vel, next_life, b.species, out_flags, out_pad);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -305,12 +341,13 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (b.life <= threshold) { return; }
 
   let half_life = b.life * 0.5;
-  boid_out[idx] = Boid(b.pos, b.vel, half_life, b.species, b.flags, 0u);
+  boid_out[idx] = Boid(b.pos, b.vel, half_life, b.species, b.flags, b._pad);
 
   let slot = atomicAdd(&spawn_count, 1u);
   if (slot < params.capacity) {
     var child_species = b.species;
     var child_flags = b.flags;
+    var child_pad = b._pad;
     if ((b.flags & FLAG_PREDATOR) == 0u) {
       let seed =
         idx ^ slot ^
@@ -321,6 +358,7 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
       if ((hash_u32(seed) % denom) == 0u) {
         child_flags = (child_flags | FLAG_PREDATOR);
         child_species = 0u;
+        child_pad = child_pad | MUTATION_FLAG;
       }
     }
     spawn_list[slot] = Boid(
@@ -329,8 +367,10 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
       half_life,
       child_species,
       child_flags,
-      0u
+      child_pad
     );
+  } else {
+    atomicAdd(&cause_counts[CAUSE_BIRTH_DROPPED], 1u);
   }
 }
 
@@ -344,9 +384,21 @@ fn apply_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
   let old = atomicAdd(&dead_free_count, -1);
   if (old > 0) {
     let spawn_index = dead_free[u32(old - 1)];
-    boid_out[spawn_index] = spawn;
+    boid_out[spawn_index] = Boid(
+      spawn.pos,
+      spawn.vel,
+      spawn.life,
+      spawn.species,
+      spawn.flags,
+      spawn._pad & ~MUTATION_FLAG
+    );
+    atomicAdd(&cause_counts[CAUSE_REPRODUCTION_SPLIT], 1u);
+    if ((spawn._pad & MUTATION_FLAG) != 0u) {
+      atomicAdd(&cause_counts[CAUSE_PREY_TO_PREDATOR_MUTATION], 1u);
+    }
   } else {
     atomicAdd(&dead_free_count, 1);
+    atomicAdd(&cause_counts[CAUSE_BIRTH_DROPPED], 1u);
   }
 }
 
@@ -355,9 +407,30 @@ fn merge_dead(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x;
   let count = atomicLoad(&dead_new_count);
   if (idx >= count) { return; }
+  let packed = dead_new[idx];
+  let death_reason = packed >> 24u;
+  let dead_idx = packed & 0x00ffffffu;
+
   let slot = atomicAdd(&dead_free_count, 1);
   if (slot >= 0) {
-    dead_free[u32(slot)] = dead_new[idx];
+    dead_free[u32(slot)] = dead_idx;
+  }
+
+  switch death_reason {
+    case DEATH_PREY_EATEN: {
+      atomicAdd(&cause_counts[CAUSE_PREY_EATEN], 1u);
+    }
+    case DEATH_PREY_LONELINESS: {
+      atomicAdd(&cause_counts[CAUSE_PREY_LONELINESS], 1u);
+    }
+    case DEATH_PREY_OVERCROWDING: {
+      atomicAdd(&cause_counts[CAUSE_PREY_OVERCROWDING], 1u);
+    }
+    case DEATH_PREDATOR_STARVATION: {
+      atomicAdd(&cause_counts[CAUSE_PREDATOR_STARVATION], 1u);
+    }
+    default: {
+    }
   }
 }
 
