@@ -1004,7 +1004,11 @@ impl State {
             },
             causes: CauseState::default(),
             audio,
-            audio_mapper: AudioControlMapper::new(AUDIO_CONTROL_WINDOW_SEC),
+            audio_mapper: AudioControlMapper::new(
+                AUDIO_CONTROL_WINDOW_SEC,
+                BOID_CAPACITY,
+                ((BOID_CAPACITY as f32) * 0.05).round() as u32,
+            ),
             audio_last_tick: Instant::now(),
             params_cpu: params,
             ui: UiState {
@@ -1412,17 +1416,20 @@ impl State {
 
         let readback_ms = {
             let readback_start = Instant::now();
+            if readback {
+                if let Some([prey_count, predator_count]) = self.read_species_counts() {
+                    self.audio_mapper
+                        .update_populations(prey_count, predator_count);
+                }
+                self.update_graph_vertices();
+            }
             let cause_counts = self.read_cause_counts();
             if let Some(counts) = cause_counts {
-                if let Some(controls) = self.audio_mapper.ingest_frame(counts, audio_dt_sec) {
+                if let Some(controls) = self.audio_mapper.ingest_events(counts, audio_dt_sec) {
                     if let Some(audio) = &self.audio {
                         audio.update_controls(controls);
                     }
                 }
-            }
-            if readback {
-                self.read_species_counts();
-                self.update_graph_vertices();
             }
             readback_start.elapsed().as_secs_f32() * 1000.0
         };
@@ -1597,7 +1604,7 @@ impl State {
         None
     }
 
-    fn read_species_counts(&mut self) {
+    fn read_species_counts(&mut self) -> Option<[u32; GRAPH_SERIES]> {
         let slice = self._buffers.species_counts_read.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |v| {
@@ -1617,7 +1624,9 @@ impl State {
             for s in 0..GRAPH_SERIES {
                 self.add_graph_point(s, counts[s] as f32, width_limit);
             }
+            return Some(counts);
         }
+        None
     }
 
     fn update_graph_vertices(&mut self) {
