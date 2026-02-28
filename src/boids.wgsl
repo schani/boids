@@ -9,20 +9,30 @@ const CAUSE_PREY_EATEN: u32 = 3u;
 const CAUSE_PREY_LONELINESS: u32 = 4u;
 const CAUSE_PREY_OVERCROWDING: u32 = 5u;
 const CAUSE_PREDATOR_STARVATION: u32 = 6u;
+const CAUSE_OLD_AGE: u32 = 7u;
+const CAUSE_PREY_COLOR_SHIFT: u32 = 8u;
 const DEATH_NONE: u32 = 0u;
 const DEATH_PREY_EATEN: u32 = 1u;
 const DEATH_PREY_LONELINESS: u32 = 2u;
 const DEATH_PREY_OVERCROWDING: u32 = 3u;
 const DEATH_PREDATOR_STARVATION: u32 = 4u;
+const DEATH_OLD_AGE: u32 = 5u;
 const MUTATION_FLAG: u32 = 0x80000000u;
+const COLOR_SHIFT_FLAG: u32 = 0x40000000u;
+const PREY_LIFETIME_MIN: u32 = 1000u;
+const PREY_LIFETIME_RANGE: u32 = 1001u;
+const PREDATOR_LIFETIME_MIN: u32 = 500u;
+const PREDATOR_LIFETIME_RANGE: u32 = 501u;
 
 struct Boid {
   pos: vec2<f32>,
   vel: vec2<f32>,
   life: f32,
+  lifetime: u32,
   species: u32,
   flags: u32,
   _pad: u32,
+  _pad2: u32,
 };
 
 struct Params {
@@ -41,6 +51,10 @@ struct Params {
   prey_to_predator_mutation_denom: u32,
   loneliness_enabled: u32,
   overcrowding_enabled: u32,
+  old_age_enabled: u32,
+  prey_gain_min_neighbors: u32,
+  prey_gain_max_neighbors: u32,
+  prey_color_shift_denom: u32,
   grid_size: vec2<u32>,
   capacity: u32,
   _pad: u32,
@@ -86,6 +100,13 @@ fn hash_u32(x: u32) -> u32 {
   return h;
 }
 
+fn random_lifetime(seed: u32, predator: bool) -> u32 {
+  let h = hash_u32(seed);
+  let prey_lifetime = PREY_LIFETIME_MIN + (h % PREY_LIFETIME_RANGE);
+  let predator_lifetime = PREDATOR_LIFETIME_MIN + (h % PREDATOR_LIFETIME_RANGE);
+  return select(prey_lifetime, predator_lifetime, predator);
+}
+
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn reset_dead_new(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x == 0u) {
@@ -98,6 +119,8 @@ fn reset_dead_new(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicStore(&cause_counts[CAUSE_PREY_LONELINESS], 0u);
     atomicStore(&cause_counts[CAUSE_PREY_OVERCROWDING], 0u);
     atomicStore(&cause_counts[CAUSE_PREDATOR_STARVATION], 0u);
+    atomicStore(&cause_counts[CAUSE_OLD_AGE], 0u);
+    atomicStore(&cause_counts[CAUSE_PREY_COLOR_SHIFT], 0u);
   }
 }
 
@@ -284,11 +307,18 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   var next_life = b.life;
+  let old_age_active = params.old_age_enabled != 0u;
+  var next_lifetime = b.lifetime;
+  if (old_age_active && b.lifetime > 0u) {
+    next_lifetime = b.lifetime - 1u;
+  }
   var alive_out = true;
   var death_reason = DEATH_NONE;
   var last_depletion_reason = b._pad;
   let loneliness_active = params.loneliness_enabled != 0u;
   let overcrowding_active = params.overcrowding_enabled != 0u;
+  let prey_gain_min_neighbors = min(params.prey_gain_min_neighbors, params.prey_gain_max_neighbors);
+  let prey_gain_max_neighbors = max(params.prey_gain_min_neighbors, params.prey_gain_max_neighbors);
   if (predator) {
     next_life = next_life - 1.0 + f32(num_prey_eaten) * params.predator_food_gain;
     last_depletion_reason = DEATH_PREDATOR_STARVATION;
@@ -296,15 +326,20 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (was_eaten) {
       alive_out = false;
       death_reason = DEATH_PREY_EATEN;
-    } else if (num_friends < 5u && loneliness_active) {
+    } else if (num_friends < prey_gain_min_neighbors && loneliness_active) {
       next_life = next_life - 1.0;
       last_depletion_reason = DEATH_PREY_LONELINESS;
-    } else if (num_friends >= 20u && overcrowding_active) {
+    } else if (num_friends > prey_gain_max_neighbors && overcrowding_active) {
       next_life = next_life - 1.0;
       last_depletion_reason = DEATH_PREY_OVERCROWDING;
-    } else if (num_friends >= 5u && num_friends < 20u) {
+    } else if (num_friends >= prey_gain_min_neighbors && num_friends <= prey_gain_max_neighbors) {
       next_life = next_life + 1.0;
     }
+  }
+
+  if (alive_out && old_age_active && next_lifetime == 0u) {
+    alive_out = false;
+    death_reason = DEATH_OLD_AGE;
   }
 
   if (alive_out && next_life <= 0.0) {
@@ -326,7 +361,7 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let next_pos = b.pos + next_vel;
   let out_pad = select(0u, last_depletion_reason, alive_out);
-  boid_out[idx] = Boid(next_pos, next_vel, next_life, b.species, out_flags, out_pad);
+  boid_out[idx] = Boid(next_pos, next_vel, next_life, next_lifetime, b.species, out_flags, out_pad, b._pad2);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -339,33 +374,45 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (b.life <= threshold) { return; }
 
   let half_life = b.life * 0.5;
-  boid_out[idx] = Boid(b.pos, b.vel, half_life, b.species, b.flags, b._pad);
+  boid_out[idx] = Boid(b.pos, b.vel, half_life, b.lifetime, b.species, b.flags, b._pad, b._pad2);
 
   let slot = atomicAdd(&spawn_count, 1u);
   if (slot < params.capacity) {
     var child_species = b.species;
     var child_flags = b.flags;
     var child_pad = b._pad;
+    let seed =
+      idx ^ slot ^
+      bitcast<u32>(b.pos.x) ^ bitcast<u32>(b.pos.y) ^
+      bitcast<u32>(b.vel.x) ^ bitcast<u32>(b.vel.y) ^
+      bitcast<u32>(half_life);
     if ((b.flags & FLAG_PREDATOR) == 0u) {
-      let seed =
-        idx ^ slot ^
-        bitcast<u32>(b.pos.x) ^ bitcast<u32>(b.pos.y) ^
-        bitcast<u32>(b.vel.x) ^ bitcast<u32>(b.vel.y) ^
-        bitcast<u32>(half_life);
       let denom = max(1u, params.prey_to_predator_mutation_denom);
       if ((hash_u32(seed) % denom) == 0u) {
         child_flags = (child_flags | FLAG_PREDATOR);
         child_species = 0u;
         child_pad = child_pad | MUTATION_FLAG;
+      } else {
+        let color_roll = hash_u32(seed ^ 0xa511e9b3u);
+        let color_denom = max(1u, params.prey_color_shift_denom);
+        if ((color_roll % color_denom) == 0u) {
+          let step = 1u + (hash_u32(color_roll ^ 0x9e3779b9u) % 4u);
+          child_species = (child_species + step) % 5u;
+          child_pad = child_pad | COLOR_SHIFT_FLAG;
+        }
       }
     }
+    let child_predator = (child_flags & FLAG_PREDATOR) != 0u;
+    let child_lifetime = random_lifetime(seed ^ child_flags ^ child_species, child_predator);
     spawn_list[slot] = Boid(
       b.pos + vec2(3.0, 3.0),
       b.vel,
       half_life,
+      child_lifetime,
       child_species,
       child_flags,
-      child_pad
+      child_pad,
+      0u
     );
   } else {
     atomicAdd(&cause_counts[CAUSE_BIRTH_DROPPED], 1u);
@@ -386,13 +433,18 @@ fn apply_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
       spawn.pos,
       spawn.vel,
       spawn.life,
+      spawn.lifetime,
       spawn.species,
       spawn.flags,
-      spawn._pad & ~MUTATION_FLAG
+      spawn._pad & ~(MUTATION_FLAG | COLOR_SHIFT_FLAG),
+      spawn._pad2
     );
     atomicAdd(&cause_counts[CAUSE_REPRODUCTION_SPLIT], 1u);
     if ((spawn._pad & MUTATION_FLAG) != 0u) {
       atomicAdd(&cause_counts[CAUSE_PREY_TO_PREDATOR_MUTATION], 1u);
+    }
+    if ((spawn._pad & COLOR_SHIFT_FLAG) != 0u) {
+      atomicAdd(&cause_counts[CAUSE_PREY_COLOR_SHIFT], 1u);
     }
   } else {
     atomicAdd(&dead_free_count, 1);
@@ -426,6 +478,9 @@ fn merge_dead(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     case DEATH_PREDATOR_STARVATION: {
       atomicAdd(&cause_counts[CAUSE_PREDATOR_STARVATION], 1u);
+    }
+    case DEATH_OLD_AGE: {
+      atomicAdd(&cause_counts[CAUSE_OLD_AGE], 1u);
     }
     default: {
     }

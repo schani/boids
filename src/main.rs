@@ -1,3 +1,6 @@
+mod audio;
+
+use audio::{AudioControlMapper, AudioEngine};
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::ScreenDescriptor;
 use rand::Rng;
@@ -25,6 +28,13 @@ const PREY_AVOIDANCE_BONUS: f32 = 10.0;
 const MAX_VELOCITY: f32 = 5.0;
 const PREDATOR_SPEED_BONUS: f32 = 1.9;
 const RADIUS: f32 = 100.0;
+const PREY_GAIN_MIN_NEIGHBORS: u32 = 5;
+const PREY_GAIN_MAX_NEIGHBORS: u32 = 20;
+const PREY_COLOR_SHIFT_DENOM: u32 = 10;
+const PREY_LIFETIME_MIN: u32 = 1000;
+const PREY_LIFETIME_MAX: u32 = 2000;
+const PREDATOR_LIFETIME_MIN: u32 = 500;
+const PREDATOR_LIFETIME_MAX: u32 = 1000;
 
 const GRAPH_SERIES: usize = 2; // combined prey + predators
 const GRAPH_READBACK_INTERVAL: u32 = 4;
@@ -33,7 +43,7 @@ const GRAPH_PADDING_PX: f32 = 16.0;
 const GRAPH_MAX_SCALE: u32 = 320;
 const GRAPH_MAX_POINTS: usize = 8192;
 const DEFAULT_MUTATION_DENOM: u32 = 1000;
-const CAUSE_COUNT: usize = 7;
+const CAUSE_COUNT: usize = 9;
 const CAUSE_WINDOW_FRAMES: usize = 60;
 const CAUSE_REPRODUCTION_SPLIT: usize = 0;
 const CAUSE_PREY_TO_PREDATOR_MUTATION: usize = 1;
@@ -42,6 +52,9 @@ const CAUSE_PREY_EATEN: usize = 3;
 const CAUSE_PREY_LONELINESS: usize = 4;
 const CAUSE_PREY_OVERCROWDING: usize = 5;
 const CAUSE_PREDATOR_STARVATION: usize = 6;
+const CAUSE_OLD_AGE: usize = 7;
+const CAUSE_PREY_COLOR_SHIFT: usize = 8;
+const AUDIO_CONTROL_WINDOW_SEC: f32 = 0.10;
 
 const FLAG_PREDATOR: u32 = 1 << 0;
 const FLAG_ALIVE: u32 = 1 << 1;
@@ -54,9 +67,11 @@ struct Boid {
     pos: [f32; 2],
     vel: [f32; 2],
     life: f32,
+    lifetime: u32,
     species: u32,
     flags: u32,
     _pad: u32,
+    _pad2: u32,
 }
 
 #[repr(C)]
@@ -77,6 +92,10 @@ struct Params {
     prey_to_predator_mutation_denom: u32,
     loneliness_enabled: u32,
     overcrowding_enabled: u32,
+    old_age_enabled: u32,
+    prey_gain_min_neighbors: u32,
+    prey_gain_max_neighbors: u32,
+    prey_color_shift_denom: u32,
     grid_size: [u32; 2],
     capacity: u32,
     _pad: u32,
@@ -242,6 +261,9 @@ struct State {
     bind_groups: BindGroups,
     graph: GraphState,
     causes: CauseState,
+    audio: Option<AudioEngine>,
+    audio_mapper: AudioControlMapper,
+    audio_last_tick: Instant,
     params_cpu: Params,
     ui: UiState,
     cursor_pos_px: Option<[f32; 2]>,
@@ -340,6 +362,10 @@ impl State {
             prey_to_predator_mutation_denom: DEFAULT_MUTATION_DENOM,
             loneliness_enabled: 0,
             overcrowding_enabled: 0,
+            old_age_enabled: 1,
+            prey_gain_min_neighbors: PREY_GAIN_MIN_NEIGHBORS,
+            prey_gain_max_neighbors: PREY_GAIN_MAX_NEIGHBORS,
+            prey_color_shift_denom: PREY_COLOR_SHIFT_DENOM,
             grid_size: [grid_x, grid_y],
             capacity: BOID_CAPACITY,
             _pad: 0,
@@ -948,6 +974,13 @@ impl State {
             None,
         );
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
+        let audio = match AudioEngine::new() {
+            Ok(engine) => Some(engine),
+            Err(err) => {
+                eprintln!("Audio disabled: {err}");
+                None
+            }
+        };
 
         let mut state = Self {
             surface,
@@ -970,6 +1003,9 @@ impl State {
                 vertex_counts: [0u32; GRAPH_SERIES],
             },
             causes: CauseState::default(),
+            audio,
+            audio_mapper: AudioControlMapper::new(AUDIO_CONTROL_WINDOW_SEC),
+            audio_last_tick: Instant::now(),
             params_cpu: params,
             ui: UiState {
                 egui_ctx,
@@ -999,6 +1035,11 @@ impl State {
 
     fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
         let frame_start = Instant::now();
+        let now = Instant::now();
+        let audio_dt_sec = (now - self.audio_last_tick)
+            .as_secs_f32()
+            .clamp(1.0 / 500.0, 0.5);
+        self.audio_last_tick = now;
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -1008,6 +1049,7 @@ impl State {
         let raw_input = self.ui.egui_winit.take_egui_input(window);
         let timings = self.ui.timings.clone();
         let fps = self.ui.fps_smoothed;
+        let audio_enabled = self.audio.is_some();
         let hover_info = self.graph_hover(window.scale_factor() as f32);
         let cause_frame_count = self.causes.history.len();
         let cause_sums = self.causes.sums;
@@ -1021,6 +1063,10 @@ impl State {
                 "Births: Prey->Predator Mutation",
                 cause_sums[CAUSE_PREY_TO_PREDATOR_MUTATION],
             ),
+            (
+                "Births: Prey Color Shift",
+                cause_sums[CAUSE_PREY_COLOR_SHIFT],
+            ),
             ("Births: Dropped (No Slot)", cause_sums[CAUSE_BIRTH_DROPPED]),
             ("Deaths: Prey Eaten", cause_sums[CAUSE_PREY_EATEN]),
             ("Deaths: Prey Loneliness", cause_sums[CAUSE_PREY_LONELINESS]),
@@ -1032,6 +1078,7 @@ impl State {
                 "Deaths: Predator Starvation",
                 cause_sums[CAUSE_PREDATOR_STARVATION],
             ),
+            ("Deaths: Old Age", cause_sums[CAUSE_OLD_AGE]),
         ];
         let overlay_margin = 12.0f32;
         let overlay_spacing = 8.0f32;
@@ -1048,6 +1095,14 @@ impl State {
                 .default_open(false)
                 .show(ctx, |ui| {
                     ui.label(format!("FPS: {:.1}", fps));
+                    ui.label(format!(
+                        "Audio: {}",
+                        if audio_enabled {
+                            "On"
+                        } else {
+                            "Off (no output device)"
+                        }
+                    ));
                     ui.separator();
                     ui.label("Simulation Parameters");
                     ui.add(
@@ -1077,12 +1132,27 @@ impl State {
                         )
                         .text("Mutation 1/N"),
                     );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.prey_gain_min_neighbors, 0..=64)
+                            .text("Prey Gain Min Neighbors"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.prey_gain_max_neighbors, 0..=64)
+                            .text("Prey Gain Max Neighbors"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut local_params.prey_color_shift_denom, 1..=100)
+                            .text("Prey Color Shift 1/N"),
+                    );
                     let mut loneliness_enabled = local_params.loneliness_enabled != 0;
                     ui.checkbox(&mut loneliness_enabled, "Loneliness Enabled");
                     local_params.loneliness_enabled = u32::from(loneliness_enabled);
                     let mut overcrowding_enabled = local_params.overcrowding_enabled != 0;
                     ui.checkbox(&mut overcrowding_enabled, "Overcrowding Enabled");
                     local_params.overcrowding_enabled = u32::from(overcrowding_enabled);
+                    let mut old_age_enabled = local_params.old_age_enabled != 0;
+                    ui.checkbox(&mut old_age_enabled, "Old Age Enabled");
+                    local_params.old_age_enabled = u32::from(old_age_enabled);
 
                     ui.separator();
                     ui.label("Frame Time Breakdown (ms)");
@@ -1342,7 +1412,14 @@ impl State {
 
         let readback_ms = {
             let readback_start = Instant::now();
-            self.read_cause_counts();
+            let cause_counts = self.read_cause_counts();
+            if let Some(counts) = cause_counts {
+                if let Some(controls) = self.audio_mapper.ingest_frame(counts, audio_dt_sec) {
+                    if let Some(audio) = &self.audio {
+                        audio.update_controls(controls);
+                    }
+                }
+            }
             if readback {
                 self.read_species_counts();
                 self.update_graph_vertices();
@@ -1498,7 +1575,7 @@ impl State {
         }
     }
 
-    fn read_cause_counts(&mut self) {
+    fn read_cause_counts(&mut self) -> Option<[u32; CAUSE_COUNT]> {
         let slice = self._buffers.cause_counts_read.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |v| {
@@ -1515,7 +1592,9 @@ impl State {
             drop(data);
             self._buffers.cause_counts_read.unmap();
             self.causes.push_frame(counts);
+            return Some(counts);
         }
+        None
     }
 
     fn read_species_counts(&mut self) {
@@ -1854,6 +1933,11 @@ fn create_initial_boids() -> Vec<Boid> {
         let species = if predator { 0 } else { rng.gen_range(0..5) };
         let flags = FLAG_ALIVE | if predator { FLAG_PREDATOR } else { 0 };
         let life = START_LIFE;
+        let lifetime = if predator {
+            rng.gen_range(PREDATOR_LIFETIME_MIN..=PREDATOR_LIFETIME_MAX)
+        } else {
+            rng.gen_range(PREY_LIFETIME_MIN..=PREY_LIFETIME_MAX)
+        };
         boids.push(Boid {
             pos: [
                 rng.gen_range(0.0..WORLD_SIZE[0]),
@@ -1864,9 +1948,11 @@ fn create_initial_boids() -> Vec<Boid> {
                 (rng.gen_range(-0.5..0.5)) * 10.0,
             ],
             life,
+            lifetime,
             species,
             flags,
             _pad: 0,
+            _pad2: 0,
         });
     }
     for _ in INITIAL_COUNT..BOID_CAPACITY {
@@ -1874,9 +1960,11 @@ fn create_initial_boids() -> Vec<Boid> {
             pos: [0.0, 0.0],
             vel: [0.0, 0.0],
             life: 0.0,
+            lifetime: 0,
             species: 0,
             flags: 0,
             _pad: 0,
+            _pad2: 0,
         });
     }
     boids
