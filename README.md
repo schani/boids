@@ -12,6 +12,29 @@ Run it with:
 cargo run --release
 ```
 
+### Headless population runs
+
+The native simulator can run the same GPU compute passes without creating a window or audio
+device. It reports the five prey species and predators at frame 0, every sampling interval, and
+the final frame:
+
+```bash
+cargo run --release -- --headless --frames 5000 --sample-every 100 --seed 1
+```
+
+CSV is written to standard output, while run metadata and timing are written to standard error,
+so results can be redirected directly into analysis tools:
+
+```bash
+cargo run --release -- --headless --frames 20000 --sample-every 250 --seed 42 > populations.csv
+```
+
+Use `--format jsonl` for streaming JSON Lines output. `--initial-count N` supports smaller smoke
+tests or density experiments (up to the simulation capacity of 75,000). Run
+`cargo run --release -- --headless --help` for the complete option list. A fixed seed reproduces
+the initial population; exact trajectories can still vary across GPU models because parallel
+floating-point and atomic operation ordering is hardware-dependent.
+
 ## Overview
 
 This simulation models a self-regulating ecosystem with two types of agents:

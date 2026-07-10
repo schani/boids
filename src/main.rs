@@ -3,8 +3,8 @@ mod audio;
 use audio::{AudioControlMapper, AudioEngine};
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::ScreenDescriptor;
-use rand::Rng;
-use std::{collections::VecDeque, time::Instant};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::{collections::VecDeque, env, process::ExitCode, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
     dpi::PhysicalSize,
@@ -37,6 +37,9 @@ const PREDATOR_LIFETIME_MIN: u32 = 500;
 const PREDATOR_LIFETIME_MAX: u32 = 1000;
 
 const GRAPH_SERIES: usize = 2; // combined prey + predators
+const PREY_SPECIES_COUNT: usize = 5;
+const POPULATION_SERIES: usize = PREY_SPECIES_COUNT + 1;
+const PREDATOR_POPULATION_INDEX: usize = PREY_SPECIES_COUNT;
 const GRAPH_READBACK_INTERVAL: u32 = 4;
 const GRAPH_HEIGHT_PX: u32 = 200;
 const GRAPH_PADDING_PX: f32 = 16.0;
@@ -249,10 +252,10 @@ struct UiState {
 }
 
 struct State {
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+    config: Option<wgpu::SurfaceConfiguration>,
     size: PhysicalSize<u32>,
     grid_cells: u32,
     current: usize,
@@ -265,21 +268,58 @@ struct State {
     audio_mapper: AudioControlMapper,
     audio_last_tick: Instant,
     params_cpu: Params,
-    ui: UiState,
+    ui: Option<UiState>,
     cursor_pos_px: Option<[f32; 2]>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum HeadlessFormat {
+    Csv,
+    Jsonl,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HeadlessOptions {
+    frames: u64,
+    sample_every: u64,
+    seed: u64,
+    initial_count: u32,
+    format: HeadlessFormat,
+}
+
+impl Default for HeadlessOptions {
+    fn default() -> Self {
+        Self {
+            frames: 5_000,
+            sample_every: 100,
+            seed: 1,
+            initial_count: INITIAL_COUNT,
+            format: HeadlessFormat::Csv,
+        }
+    }
+}
+
+enum RunMode {
+    Gui,
+    Headless(HeadlessOptions),
+    Help,
+}
+
 impl State {
-    async fn new(window: &winit::window::Window) -> Self {
-        let size = window.inner_size();
+    async fn new(window: Option<&winit::window::Window>, initial_count: u32, seed: u64) -> Self {
+        assert!(initial_count <= BOID_CAPACITY);
+        let size = window
+            .map(winit::window::Window::inner_size)
+            .unwrap_or_else(|| PhysicalSize::new(1, 1));
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window).expect("surface");
-        let surface =
-            unsafe { std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(surface) };
+        let surface = window.map(|window| {
+            let surface = instance.create_surface(window).expect("surface");
+            unsafe { std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(surface) }
+        });
         let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
+                compatible_surface: surface.as_ref(),
                 force_fallback_adapter: false,
             })
             .await
@@ -290,11 +330,12 @@ impl State {
                     .request_adapter(&wgpu::RequestAdapterOptions {
                         power_preference: wgpu::PowerPreference::LowPower,
                         compatible_surface: None,
-                        force_fallback_adapter: false,
+                        force_fallback_adapter: window.is_none(),
                     })
                     .await;
 
                 match fallback {
+                    Some(adapter) if window.is_none() => adapter,
                     Some(adapter) => {
                         let info = adapter.get_info();
                         panic!(
@@ -326,19 +367,28 @@ impl State {
             .await
             .expect("device");
 
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats[0];
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: surface_caps.present_modes[0],
-            desired_maximum_frame_latency: 2,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![surface_format],
+        let (surface_format, config) = if let Some(surface) = &surface {
+            let surface_caps = surface.get_capabilities(&adapter);
+            let surface_format = surface_caps.formats[0];
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: surface_format,
+                width: size.width,
+                height: size.height,
+                present_mode: surface_caps.present_modes[0],
+                desired_maximum_frame_latency: 2,
+                alpha_mode: surface_caps.alpha_modes[0],
+                view_formats: vec![surface_format],
+            };
+            surface.configure(&device, &config);
+            (surface_format, Some(config))
+        } else {
+            (wgpu::TextureFormat::Rgba8UnormSrgb, None)
         };
-        surface.configure(&device, &config);
+        if window.is_none() {
+            let info = adapter.get_info();
+            eprintln!("Headless GPU adapter: {} ({:?})", info.name, info.backend);
+        }
 
         let cell_size = RADIUS;
         let grid_x = (WORLD_SIZE[0] / cell_size).ceil() as u32;
@@ -377,7 +427,7 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        let initial_boids = create_initial_boids();
+        let initial_boids = create_initial_boids(initial_count, seed);
         let boid_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("boids_a"),
             size: (std::mem::size_of::<Boid>() as u64) * BOID_CAPACITY as u64,
@@ -465,7 +515,7 @@ impl State {
 
         let species_counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("species_counts"),
-            size: (GRAPH_SERIES as u64) * 4,
+            size: (POPULATION_SERIES as u64) * 4,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -473,7 +523,7 @@ impl State {
         });
         let species_counts_read = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("species_counts_read"),
-            size: (GRAPH_SERIES as u64) * 4,
+            size: (POPULATION_SERIES as u64) * 4,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -501,7 +551,7 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let (dead_free_list, dead_free_count_value) = create_dead_free_list(INITIAL_COUNT);
+        let (dead_free_list, dead_free_count_value) = create_dead_free_list(initial_count);
         queue.write_buffer(&dead_free, 0, bytemuck::cast_slice(&dead_free_list));
         queue.write_buffer(
             &dead_free_count,
@@ -965,21 +1015,34 @@ impl State {
             render,
         };
 
-        let egui_ctx = egui::Context::default();
-        let egui_winit = egui_winit::State::new(
-            egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            window,
-            Some(window.scale_factor() as f32),
-            None,
-        );
-        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
-        let audio = match AudioEngine::new() {
-            Ok(engine) => Some(engine),
-            Err(err) => {
-                eprintln!("Audio disabled: {err}");
-                None
+        let ui = window.map(|window| {
+            let egui_ctx = egui::Context::default();
+            let egui_winit = egui_winit::State::new(
+                egui_ctx.clone(),
+                egui::ViewportId::ROOT,
+                window,
+                Some(window.scale_factor() as f32),
+                None,
+            );
+            let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
+            UiState {
+                egui_ctx,
+                egui_winit,
+                egui_renderer,
+                fps_smoothed: 0.0,
+                timings: FrameBreakdown::default(),
             }
+        });
+        let audio = if window.is_some() {
+            match AudioEngine::new() {
+                Ok(engine) => Some(engine),
+                Err(err) => {
+                    eprintln!("Audio disabled: {err}");
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         let mut state = Self {
@@ -1011,13 +1074,7 @@ impl State {
             ),
             audio_last_tick: Instant::now(),
             params_cpu: params,
-            ui: UiState {
-                egui_ctx,
-                egui_winit,
-                egui_renderer,
-                fps_smoothed: 0.0,
-                timings: FrameBreakdown::default(),
-            },
+            ui,
             cursor_pos_px: None,
         };
         state.update_graph_vertices();
@@ -1027,14 +1084,21 @@ impl State {
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
+            if let (Some(surface), Some(config)) = (&self.surface, &mut self.config) {
+                config.width = new_size.width;
+                config.height = new_size.height;
+                surface.configure(&self.device, config);
+            }
         }
     }
 
     fn handle_window_event(&mut self, window: &winit::window::Window, event: &WindowEvent) -> bool {
-        self.ui.egui_winit.on_window_event(window, event).consumed
+        self.ui
+            .as_mut()
+            .expect("GUI state")
+            .egui_winit
+            .on_window_event(window, event)
+            .consumed
     }
 
     fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
@@ -1044,15 +1108,20 @@ impl State {
             .as_secs_f32()
             .clamp(1.0 / 500.0, 0.5);
         self.audio_last_tick = now;
-        let output = self.surface.get_current_texture()?;
+        let output = self
+            .surface
+            .as_ref()
+            .expect("GUI surface")
+            .get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let ui_start = Instant::now();
 
-        let raw_input = self.ui.egui_winit.take_egui_input(window);
-        let timings = self.ui.timings.clone();
-        let fps = self.ui.fps_smoothed;
+        let mut ui = self.ui.take().expect("GUI state");
+        let raw_input = ui.egui_winit.take_egui_input(window);
+        let timings = ui.timings.clone();
+        let fps = ui.fps_smoothed;
         let audio_enabled = self.audio.is_some();
         let hover_info = self.graph_hover(window.scale_factor() as f32);
         let cause_frame_count = self.causes.history.len();
@@ -1093,7 +1162,7 @@ impl State {
         let sim_default_y =
             (causes_default_y - overlay_spacing - collapsed_height).max(overlay_margin);
         let mut local_params = self.params_cpu;
-        let full_output = self.ui.egui_ctx.run(raw_input, |ctx| {
+        let full_output = ui.egui_ctx.run(raw_input, |ctx| {
             egui::Window::new("Sim Controls")
                 .default_pos([overlay_margin, sim_default_y])
                 .default_open(false)
@@ -1272,11 +1341,9 @@ impl State {
             bytemuck::bytes_of(&self.params_cpu),
         );
 
-        self.ui
-            .egui_winit
+        ui.egui_winit
             .handle_platform_output(window, full_output.platform_output);
-        let paint_jobs = self
-            .ui
+        let paint_jobs = ui
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
         let screen_desc = ScreenDescriptor {
@@ -1284,8 +1351,7 @@ impl State {
             pixels_per_point: full_output.pixels_per_point,
         };
         for (id, image_delta) in &full_output.textures_delta.set {
-            self.ui
-                .egui_renderer
+            ui.egui_renderer
                 .update_texture(&self.device, &self.queue, *id, image_delta);
         }
 
@@ -1294,7 +1360,7 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("encoder"),
             });
-        self.ui.egui_renderer.update_buffers(
+        ui.egui_renderer.update_buffers(
             &self.device,
             &self.queue,
             &mut encoder,
@@ -1320,7 +1386,7 @@ impl State {
                 0,
                 &self._buffers.species_counts_read,
                 0,
-                (GRAPH_SERIES as u64) * 4,
+                (POPULATION_SERIES as u64) * 4,
             );
         }
         self.current = 1 - self.current;
@@ -1400,13 +1466,12 @@ impl State {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.ui
-                .egui_renderer
+            ui.egui_renderer
                 .render(&mut ui_pass, &paint_jobs, &screen_desc);
         }
 
         for id in &full_output.textures_delta.free {
-            self.ui.egui_renderer.free_texture(id);
+            ui.egui_renderer.free_texture(id);
         }
 
         let submit_start = Instant::now();
@@ -1417,9 +1482,14 @@ impl State {
         let readback_ms = {
             let readback_start = Instant::now();
             if readback {
-                if let Some([prey_count, predator_count]) = self.read_species_counts() {
+                if let Some(counts) = self.read_population_counts() {
+                    let prey_count = counts[..PREY_SPECIES_COUNT].iter().sum();
+                    let predator_count = counts[PREDATOR_POPULATION_INDEX];
                     self.audio_mapper
                         .update_populations(prey_count, predator_count);
+                    let width_limit = self.graph_width_limit();
+                    self.add_graph_point(0, prey_count as f32, width_limit);
+                    self.add_graph_point(1, predator_count as f32, width_limit);
                 }
                 self.update_graph_vertices();
             }
@@ -1435,7 +1505,7 @@ impl State {
         };
         self.graph.frame += 1;
         let total_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-        self.ui.timings = FrameBreakdown {
+        ui.timings = FrameBreakdown {
             compute_ms,
             sim_render_ms,
             graph_render_ms,
@@ -1446,12 +1516,13 @@ impl State {
         };
         if total_ms > 0.0 {
             let instant_fps = 1000.0 / total_ms;
-            self.ui.fps_smoothed = if self.ui.fps_smoothed <= 0.0 {
+            ui.fps_smoothed = if ui.fps_smoothed <= 0.0 {
                 instant_fps
             } else {
-                self.ui.fps_smoothed * 0.9 + instant_fps * 0.1
+                ui.fps_smoothed * 0.9 + instant_fps * 0.1
             };
         }
+        self.ui = Some(ui);
         Ok(())
     }
 
@@ -1582,6 +1653,65 @@ impl State {
         }
     }
 
+    fn read_current_population(&mut self) -> Result<[u32; POPULATION_SERIES], String> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("headless_initial_population"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("clear_population"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.clear_species);
+            pass.set_bind_group(0, &self.bind_groups.clear_species, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("count_population"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.count_species);
+            pass.set_bind_group(0, &self.bind_groups.count_species[self.current], &[]);
+            pass.dispatch_workgroups(dispatch_count(BOID_CAPACITY, WORKGROUP_SIZE), 1, 1);
+        }
+        self.copy_population_to_readback(&mut encoder);
+        self.queue.submit(Some(encoder.finish()));
+        self.read_population_counts()
+            .ok_or_else(|| "failed to read initial population from GPU".to_string())
+    }
+
+    fn run_headless_frames(
+        &mut self,
+        frame_count: u64,
+    ) -> Result<[u32; POPULATION_SERIES], String> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("headless_frames"),
+            });
+        for _ in 0..frame_count {
+            self.run_compute_passes(&mut encoder);
+            self.current = 1 - self.current;
+        }
+        self.copy_population_to_readback(&mut encoder);
+        self.queue.submit(Some(encoder.finish()));
+        self.read_population_counts()
+            .ok_or_else(|| "failed to read population from GPU".to_string())
+    }
+
+    fn copy_population_to_readback(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.copy_buffer_to_buffer(
+            &self._buffers.species_counts,
+            0,
+            &self._buffers.species_counts_read,
+            0,
+            (POPULATION_SERIES as u64) * 4,
+        );
+    }
+
     fn read_cause_counts(&mut self) -> Option<[u32; CAUSE_COUNT]> {
         let slice = self._buffers.cause_counts_read.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -1604,7 +1734,7 @@ impl State {
         None
     }
 
-    fn read_species_counts(&mut self) -> Option<[u32; GRAPH_SERIES]> {
+    fn read_population_counts(&mut self) -> Option<[u32; POPULATION_SERIES]> {
         let slice = self._buffers.species_counts_read.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |v| {
@@ -1614,16 +1744,12 @@ impl State {
         if let Ok(Ok(())) = receiver.recv() {
             let data = slice.get_mapped_range();
             let counts_src: &[u32] = bytemuck::cast_slice(&data);
-            let mut counts = [0u32; GRAPH_SERIES];
-            if counts_src.len() >= GRAPH_SERIES {
-                counts.copy_from_slice(&counts_src[..GRAPH_SERIES]);
+            let mut counts = [0u32; POPULATION_SERIES];
+            if counts_src.len() >= POPULATION_SERIES {
+                counts.copy_from_slice(&counts_src[..POPULATION_SERIES]);
             }
             drop(data);
             self._buffers.species_counts_read.unmap();
-            let width_limit = self.graph_width_limit();
-            for s in 0..GRAPH_SERIES {
-                self.add_graph_point(s, counts[s] as f32, width_limit);
-            }
             return Some(counts);
         }
         None
@@ -1933,13 +2059,17 @@ fn bind_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
-fn create_initial_boids() -> Vec<Boid> {
-    let predator_count = (INITIAL_COUNT as f32 * PREDATOR_RATIO).round() as u32;
-    let mut rng = rand::thread_rng();
+fn create_initial_boids(initial_count: u32, seed: u64) -> Vec<Boid> {
+    let predator_count = (initial_count as f32 * PREDATOR_RATIO).round() as u32;
+    let mut rng = StdRng::seed_from_u64(seed);
     let mut boids = Vec::with_capacity(BOID_CAPACITY as usize);
-    for i in 0..INITIAL_COUNT {
+    for i in 0..initial_count {
         let predator = i < predator_count;
-        let species = if predator { 0 } else { rng.gen_range(0..5) };
+        let species = if predator {
+            0
+        } else {
+            rng.gen_range(0..PREY_SPECIES_COUNT as u32)
+        };
         let flags = FLAG_ALIVE | if predator { FLAG_PREDATOR } else { 0 };
         let life = START_LIFE;
         let lifetime = if predator {
@@ -1964,7 +2094,7 @@ fn create_initial_boids() -> Vec<Boid> {
             _pad2: 0,
         });
     }
-    for _ in INITIAL_COUNT..BOID_CAPACITY {
+    for _ in initial_count..BOID_CAPACITY {
         boids.push(Boid {
             pos: [0.0, 0.0],
             vel: [0.0, 0.0],
@@ -1989,7 +2119,137 @@ fn create_dead_free_list(initial_count: u32) -> (Vec<u32>, u32) {
     (list, count)
 }
 
-fn main() {
+fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode, String> {
+    let args: Vec<String> = args.into_iter().collect();
+    if args.is_empty() {
+        return Ok(RunMode::Gui);
+    }
+    if args[0] == "--help" || args[0] == "-h" {
+        return Ok(RunMode::Help);
+    }
+    if args[0] != "--headless" {
+        return Err(format!("unknown argument: {}", args[0]));
+    }
+
+    let mut options = HeadlessOptions::default();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--help" || args[i] == "-h" {
+            return Ok(RunMode::Help);
+        }
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| format!("{} requires a value", args[i]))?;
+        match args[i].as_str() {
+            "--frames" => {
+                options.frames = value
+                    .parse()
+                    .map_err(|_| format!("invalid frame count: {value}"))?;
+            }
+            "--sample-every" => {
+                options.sample_every = value
+                    .parse()
+                    .map_err(|_| format!("invalid sampling interval: {value}"))?;
+            }
+            "--seed" => {
+                options.seed = value
+                    .parse()
+                    .map_err(|_| format!("invalid seed: {value}"))?;
+            }
+            "--initial-count" => {
+                options.initial_count = value
+                    .parse()
+                    .map_err(|_| format!("invalid initial count: {value}"))?;
+            }
+            "--format" => {
+                options.format = match value.as_str() {
+                    "csv" => HeadlessFormat::Csv,
+                    "jsonl" => HeadlessFormat::Jsonl,
+                    _ => return Err(format!("invalid format: {value} (expected csv or jsonl)")),
+                };
+            }
+            option => return Err(format!("unknown headless option: {option}")),
+        }
+        i += 2;
+    }
+
+    if options.sample_every == 0 {
+        return Err("--sample-every must be greater than zero".to_string());
+    }
+    if options.initial_count > BOID_CAPACITY {
+        return Err(format!(
+            "--initial-count cannot exceed the capacity of {BOID_CAPACITY}"
+        ));
+    }
+    Ok(RunMode::Headless(options))
+}
+
+fn print_usage() {
+    println!(
+        "Boids GPU\n\n\
+         Usage:\n\
+           boids                         Run the interactive simulation\n\
+           boids --headless [OPTIONS]    Run without a window or audio\n\n\
+         Headless options:\n\
+           --frames N          Frames to simulate (default: 5000)\n\
+           --sample-every N    Emit population every N frames (default: 100)\n\
+           --seed N            Initial population seed (default: 1)\n\
+           --initial-count N   Initial boids, max {BOID_CAPACITY} (default: {INITIAL_COUNT})\n\
+           --format FORMAT     csv or jsonl (default: csv)\n\
+           -h, --help          Show this help"
+    );
+}
+
+fn emit_population(format: HeadlessFormat, frame: u64, counts: &[u32; POPULATION_SERIES]) {
+    let total: u32 = counts.iter().sum();
+    match format {
+        HeadlessFormat::Csv => println!(
+            "{frame},{},{},{},{},{},{},{total}",
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            counts[4],
+            counts[PREDATOR_POPULATION_INDEX]
+        ),
+        HeadlessFormat::Jsonl => println!(
+            "{{\"frame\":{frame},\"populations\":{{\"prey_0\":{},\"prey_1\":{},\"prey_2\":{},\"prey_3\":{},\"prey_4\":{},\"predators\":{}}},\"total\":{total}}}",
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            counts[4],
+            counts[PREDATOR_POPULATION_INDEX]
+        ),
+    }
+}
+
+async fn run_headless(options: HeadlessOptions) -> Result<(), String> {
+    let started = Instant::now();
+    let mut state = State::new(None, options.initial_count, options.seed).await;
+    eprintln!(
+        "Headless run: frames={}, sample_every={}, seed={}, initial_count={}, format={:?}",
+        options.frames, options.sample_every, options.seed, options.initial_count, options.format
+    );
+    if options.format == HeadlessFormat::Csv {
+        println!("frame,prey_0,prey_1,prey_2,prey_3,prey_4,predators,total");
+    }
+
+    let initial = state.read_current_population()?;
+    emit_population(options.format, 0, &initial);
+
+    let mut frame = 0;
+    while frame < options.frames {
+        let chunk = options.sample_every.min(options.frames - frame);
+        let counts = state.run_headless_frames(chunk)?;
+        frame += chunk;
+        emit_population(options.format, frame, &counts);
+    }
+    eprintln!("Completed in {:.3}s", started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn run_gui() {
     let event_loop = EventLoop::new().expect("event loop");
     let window = WindowBuilder::new()
         .with_title("Boids GPU (wgpu)")
@@ -1997,7 +2257,11 @@ fn main() {
         .build(&event_loop)
         .expect("window");
 
-    let mut state = pollster::block_on(State::new(&window));
+    let mut state = pollster::block_on(State::new(
+        Some(&window),
+        INITIAL_COUNT,
+        rand::random::<u64>(),
+    ));
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
@@ -2040,4 +2304,72 @@ fn main() {
             _ => {}
         })
         .expect("run");
+}
+
+fn main() -> ExitCode {
+    let mode = match parse_run_mode(env::args().skip(1)) {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("Error: {err}\n");
+            print_usage();
+            return ExitCode::from(2);
+        }
+    };
+
+    match mode {
+        RunMode::Gui => run_gui(),
+        RunMode::Headless(options) => {
+            if let Err(err) = pollster::block_on(run_headless(options)) {
+                eprintln!("Headless run failed: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+        RunMode::Help => print_usage(),
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_headless_options() {
+        let mode = parse_run_mode(
+            [
+                "--headless",
+                "--frames",
+                "250",
+                "--sample-every",
+                "25",
+                "--seed",
+                "42",
+                "--initial-count",
+                "1000",
+                "--format",
+                "jsonl",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap();
+        let RunMode::Headless(options) = mode else {
+            panic!("expected headless mode");
+        };
+        assert_eq!(
+            options,
+            HeadlessOptions {
+                frames: 250,
+                sample_every: 25,
+                seed: 42,
+                initial_count: 1000,
+                format: HeadlessFormat::Jsonl,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_zero_sampling_interval() {
+        let result = parse_run_mode(["--headless", "--sample-every", "0"].map(str::to_string));
+        assert!(result.is_err());
+    }
 }

@@ -23,6 +23,9 @@ const PREY_LIFETIME_MIN: u32 = 1000u;
 const PREY_LIFETIME_RANGE: u32 = 1001u;
 const PREDATOR_LIFETIME_MIN: u32 = 500u;
 const PREDATOR_LIFETIME_RANGE: u32 = 501u;
+const PREY_SPECIES_COUNT: u32 = 5u;
+const POPULATION_SERIES: u32 = PREY_SPECIES_COUNT + 1u;
+const PREDATOR_POPULATION_INDEX: u32 = PREY_SPECIES_COUNT;
 
 struct Boid {
   pos: vec2<f32>,
@@ -489,7 +492,7 @@ fn merge_dead(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(32)
 fn clear_species_counts(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x < 2u) {
+  if (gid.x < POPULATION_SERIES) {
     atomicStore(&species_counts[gid.x], 0u);
   }
 }
@@ -502,9 +505,9 @@ fn count_species(@builtin(global_invocation_id) gid: vec3<u32>) {
   if ((b.flags & FLAG_ALIVE) == 0u) { return; }
 
   if ((b.flags & FLAG_PREDATOR) != 0u) {
-    atomicAdd(&species_counts[1u], 1u);
+    atomicAdd(&species_counts[PREDATOR_POPULATION_INDEX], 1u);
   } else {
-    atomicAdd(&species_counts[0u], 1u);
+    atomicAdd(&species_counts[b.species % PREY_SPECIES_COUNT], 1u);
   }
 }
 
