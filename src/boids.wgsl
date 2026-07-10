@@ -722,8 +722,14 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
       vec3(0.15, 1.0, 0.35),
       (b.flags & FLAG_WARDEN_CHARGING) != 0u
     );
-  } else if (panic_level(b._pad) > 0u) {
-    color = mix(color, vec3(1.0, 0.35, 0.05), 0.55);
+  }
+  let panic = panic_level(b._pad);
+  if (!predator && panic > 0u) {
+    let panic_strength = f32(panic) / f32(PANIC_MAX);
+    color = mix(color, vec3(1.0, 0.03, 0.72), 0.22 + panic_strength * 0.35);
+    if (kind == KIND_COURIER && panic == PANIC_MAX) {
+      color = mix(color, vec3(1.0, 0.92, 1.0), 0.72);
+    }
   }
   if (predator) {
     color = vec3(1.0, 0.267, 0.267);
@@ -738,6 +744,84 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     discard;
   }
   return vec4(in.color, 1.0);
+}
+
+struct EffectOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) local: vec2<f32>,
+  @location(1) phase: f32,
+  @location(2) @interpolate(flat) effect: u32,
+};
+
+@vertex
+fn vs_effect(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> EffectOut {
+  let b = boid_in[iid];
+  if ((b.flags & FLAG_ALIVE) == 0u || (b.flags & FLAG_PREDATOR) != 0u) {
+    return EffectOut(vec4(2.0, 2.0, 0.0, 1.0), vec2(0.0), 0.0, 0u);
+  }
+
+  let kind = b.kind % PREY_KIND_COUNT;
+  let panic = panic_level(b._pad);
+  var effect = 0u;
+  var extent = 1.0;
+  var phase = 0.0;
+  if (kind == KIND_COURIER && panic == PANIC_MAX && (hash_u32(iid) % 8u) == 0u) {
+    effect = 2u;
+    extent = 180.0;
+    phase = f32(b.lifetime % 72u) / 72.0;
+  } else if (kind == KIND_PULSE && (hash_u32(iid) % 32u) == 0u) {
+    effect = 1u;
+    extent = 145.0;
+    phase = f32(pulse_tick(b._pad)) / f32(PULSE_PERIOD);
+  } else if (panic > 0u && (hash_u32(iid ^ 0x9e3779b9u) % 128u) == 0u) {
+    effect = 3u;
+    extent = 95.0;
+    phase = f32(panic) / f32(PANIC_MAX);
+  }
+  if (effect == 0u) {
+    return EffectOut(vec4(2.0, 2.0, 0.0, 1.0), vec2(0.0), 0.0, 0u);
+  }
+
+  var local = vec2(-1.0, -1.0);
+  if (vid == 1u || vid == 4u) {
+    local = vec2(1.0, -1.0);
+  } else if (vid == 2u || vid == 3u) {
+    local = vec2(-1.0, 1.0);
+  } else if (vid == 5u) {
+    local = vec2(1.0, 1.0);
+  }
+  let world = b.pos + local * extent;
+  let ndc = vec2(
+    world.x / params.world_size.x * 2.0 - 1.0,
+    1.0 - world.y / params.world_size.y * 2.0
+  );
+  return EffectOut(vec4(ndc, 0.0, 1.0), local, phase, effect);
+}
+
+@fragment
+fn fs_effect(in: EffectOut) -> @location(0) vec4<f32> {
+  let dist = length(in.local);
+  if (dist > 1.0 || in.effect == 0u) { discard; }
+
+  if (in.effect == 1u) {
+    let wave = sin(in.phase * 6.28318530718);
+    let ring_radius = 0.55 + wave * 0.24;
+    let ring = 1.0 - smoothstep(0.025, 0.085, abs(dist - ring_radius));
+    let field = (1.0 - smoothstep(0.0, 1.0, dist)) * 0.055;
+    return vec4(1.0, 0.62 + wave * 0.10, 0.02, ring * 0.40 + field);
+  }
+
+  if (in.effect == 2u) {
+    let ring_radius = 0.18 + (1.0 - in.phase) * 0.72;
+    let ring = 1.0 - smoothstep(0.025, 0.075, abs(dist - ring_radius));
+    let second_ring = 1.0 - smoothstep(0.02, 0.065, abs(dist - ring_radius * 0.55));
+    return vec4(1.0, 0.05, 0.78, ring * 0.58 + second_ring * 0.22);
+  }
+
+  let ring_radius = 0.38 + (1.0 - in.phase) * 0.38;
+  let ring = 1.0 - smoothstep(0.035, 0.12, abs(dist - ring_radius));
+  let halo = (1.0 - smoothstep(0.0, 1.0, dist)) * in.phase * 0.09;
+  return vec4(1.0, 0.02, 0.72, ring * in.phase * 0.26 + halo);
 }
 
 struct GraphIn {

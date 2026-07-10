@@ -4,7 +4,15 @@ use audio::{AudioControlMapper, AudioEngine};
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::ScreenDescriptor;
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::{collections::VecDeque, env, process::ExitCode, time::Instant};
+use std::{
+    collections::VecDeque,
+    env,
+    fs::File,
+    io::BufWriter,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Instant,
+};
 use wgpu::util::DeviceExt;
 use winit::{
     dpi::PhysicalSize,
@@ -143,6 +151,7 @@ struct Pipelines {
     merge_dead: wgpu::ComputePipeline,
     clear_species: wgpu::ComputePipeline,
     count_species: wgpu::ComputePipeline,
+    effects: wgpu::RenderPipeline,
     render: wgpu::RenderPipeline,
     graph: wgpu::RenderPipeline,
 }
@@ -311,6 +320,9 @@ struct HeadlessOptions {
     initial_count: u32,
     mix: InitialMix,
     format: HeadlessFormat,
+    render_path: Option<PathBuf>,
+    render_width: u32,
+    render_height: u32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -339,6 +351,9 @@ impl Default for HeadlessOptions {
             initial_count: INITIAL_COUNT,
             mix: InitialMix::default(),
             format: HeadlessFormat::Csv,
+            render_path: None,
+            render_width: 1600,
+            render_height: 1000,
         }
     }
 }
@@ -820,6 +835,7 @@ impl State {
                 &count_species_layout,
                 "count_species",
             ),
+            effects: effects_pipeline(&device, &shader, &render_layout, surface_format),
             render: render_pipeline(&device, &shader, &render_layout, surface_format),
             graph: graph_pipeline(&device, &shader, surface_format),
         };
@@ -1494,6 +1510,9 @@ impl State {
             );
             render_pass.set_scissor_rect(0, 0, self.size.width, boid_height);
             let sim_start = Instant::now();
+            render_pass.set_pipeline(&self.pipelines.effects);
+            render_pass.set_bind_group(0, &self.bind_groups.render[self.current], &[]);
+            render_pass.draw(0..6, 0..BOID_CAPACITY);
             render_pass.set_pipeline(&self.pipelines.render);
             render_pass.set_bind_group(0, &self.bind_groups.render[self.current], &[]);
             render_pass.draw(0..3, 0..BOID_CAPACITY);
@@ -1793,6 +1812,122 @@ impl State {
         }
     }
 
+    fn render_headless_png(&self, path: &Path, width: u32, height: u32) -> Result<(), String> {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("headless_render_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let unpadded_bytes_per_row = width * 4;
+        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("headless_render_readback"),
+            size: padded_bytes_per_row as u64 * height as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("headless_render_encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("headless_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipelines.effects);
+            pass.set_bind_group(0, &self.bind_groups.render[self.current], &[]);
+            pass.draw(0..6, 0..BOID_CAPACITY);
+            pass.set_pipeline(&self.pipelines.render);
+            pass.set_bind_group(0, &self.bind_groups.render[self.current], &[]);
+            pass.draw(0..3, 0..BOID_CAPACITY);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .map_err(|_| "headless render readback channel closed".to_string())?
+            .map_err(|err| format!("failed to map headless render: {err}"))?;
+
+        let mapped = slice.get_mapped_range();
+        let mut rgba = Vec::with_capacity(unpadded_bytes_per_row as usize * height as usize);
+        for row in mapped.chunks_exact(padded_bytes_per_row as usize) {
+            rgba.extend_from_slice(&row[..unpadded_bytes_per_row as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        }
+        let file = File::create(path)
+            .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+        let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|err| format!("failed to initialize PNG: {err}"))?;
+        writer
+            .write_image_data(&rgba)
+            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+        Ok(())
+    }
+
     fn copy_population_to_readback(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.copy_buffer_to_buffer(
             &self._buffers.species_counts,
@@ -2063,6 +2198,44 @@ fn render_pipeline(
     })
 }
 
+fn effects_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("effects_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_effect",
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_effect",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    })
+}
+
 fn graph_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -2280,6 +2453,19 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode, Str
                     _ => return Err(format!("invalid format: {value} (expected csv or jsonl)")),
                 };
             }
+            "--render" => {
+                options.render_path = Some(PathBuf::from(value));
+            }
+            "--render-width" => {
+                options.render_width = value
+                    .parse()
+                    .map_err(|_| format!("invalid render width: {value}"))?;
+            }
+            "--render-height" => {
+                options.render_height = value
+                    .parse()
+                    .map_err(|_| format!("invalid render height: {value}"))?;
+            }
             option => return Err(format!("unknown headless option: {option}")),
         }
         i += 2;
@@ -2292,6 +2478,9 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode, Str
         return Err(format!(
             "--initial-count cannot exceed the capacity of {BOID_CAPACITY}"
         ));
+    }
+    if options.render_width == 0 || options.render_height == 0 {
+        return Err("render dimensions must be greater than zero".to_string());
     }
     let special_ratio =
         options.mix.pulse_ratio + options.mix.courier_ratio + options.mix.warden_ratio;
@@ -2328,6 +2517,9 @@ fn print_usage() {
            --courier-ratio R   Initial fraction of prey that carry panic (default: 0.002)\n\
            --warden-ratio R    Initial fraction of prey that defend (default: 0.08)\n\
            --format FORMAT     csv or jsonl (default: csv)\n\
+           --render PATH       Render the final frame to a PNG\n\
+           --render-width N    PNG width in pixels (default: 1600)\n\
+           --render-height N   PNG height in pixels (default: 1000)\n\
            -h, --help          Show this help"
     );
 }
@@ -2406,6 +2598,15 @@ async fn run_headless(options: HeadlessOptions) -> Result<(), String> {
         }
         let counts = counts.ok_or_else(|| "population sample was not produced".to_string())?;
         emit_population(options.format, frame, &counts);
+    }
+    if let Some(path) = &options.render_path {
+        let render_started = Instant::now();
+        state.render_headless_png(path, options.render_width, options.render_height)?;
+        eprintln!(
+            "Rendered frame {frame} to {} in {:.1} ms",
+            path.display(),
+            render_started.elapsed().as_secs_f64() * 1000.0
+        );
     }
     let simulation_elapsed = simulation_started.elapsed();
     let frames_per_second = if simulation_elapsed.is_zero() {
@@ -2528,6 +2729,12 @@ mod tests {
                 "0.12",
                 "--format",
                 "jsonl",
+                "--render",
+                "frame.png",
+                "--render-width",
+                "1280",
+                "--render-height",
+                "720",
             ]
             .map(str::to_string),
         )
@@ -2548,6 +2755,9 @@ mod tests {
                     warden_ratio: 0.12,
                 },
                 format: HeadlessFormat::Jsonl,
+                render_path: Some(PathBuf::from("frame.png")),
+                render_width: 1280,
+                render_height: 720,
             }
         );
     }
@@ -2569,6 +2779,21 @@ mod tests {
                 "0.3",
                 "--warden-ratio",
                 "0.31",
+            ]
+            .map(str::to_string),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_zero_render_dimension() {
+        let result = parse_run_mode(
+            [
+                "--headless",
+                "--render-width",
+                "0",
+                "--render-height",
+                "720",
             ]
             .map(str::to_string),
         );

@@ -35,6 +35,17 @@ tests or density experiments (up to the simulation capacity of 75,000). Run
 the initial population; exact trajectories can still vary across GPU models because parallel
 floating-point and atomic operation ordering is hardware-dependent.
 
+Headless runs can render their final GPU state directly to a PNG without opening a window. The
+off-screen image uses the same boid and effects pipelines as the interactive simulation:
+
+```bash
+cargo run --release -- --headless --frames 1200 --seed 42 \
+  --render artifacts/frame-1200.png --render-width 1600 --render-height 1000
+```
+
+Changing `--frames` provides repeatable checkpoint requests for visual comparisons. Rendering
+happens only after simulation completes, so it does not distort headless throughput measurements.
+
 Headless output also includes each behavioral kind (`standard`, `pulse`, `courier`, and `warden`)
 plus the instantaneous numbers of panicked prey and charging wardens. Initial mixes can be isolated
 or combined with `--pulse-ratio`, `--courier-ratio`, and `--warden-ratio`. For example, this runs a
@@ -51,10 +62,13 @@ Three uncommon prey kinds add large-scale motion without adding a simulation pas
 structure. They reuse the neighbor checks already performed for flocking:
 
 - **Pulse** (gold, breathing triangles) continuously alternates between attracting and repelling
-  nearby boids, producing expanding and contracting pockets in a flock.
+  nearby boids. Offspring inherit their parent’s phase, creating local synchronized clusters,
+  while sampled translucent gold rings expose expanding and contracting pressure fields without
+  drawing a ring for every boid.
 - **Panic Courier** (long magenta triangles) emits a short-lived panic signal after spotting a
-  predator. Signal strength falls by one at each hop, so alarm fronts travel through nearby prey
-  and then dissipate instead of becoming a permanent global state.
+  predator. Signal strength falls by one at each hop. Bright double-ring Courier beacons, sparse
+  relay ripples, and a strength-weighted magenta tint make alarm fronts visible as they travel
+  through nearby prey and dissipate.
 - **Warden** (wide green triangles) charges a nearby predator when another Warden is present. A
   charging Warden glows brighter, cannot be eaten while the pair holds, and repels predators.
   Charging drains life, so Wardens surge during predator waves but cannot turn that temporary
