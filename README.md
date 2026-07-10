@@ -56,11 +56,15 @@ structure. They reuse the neighbor checks already performed for flocking:
   predator. Signal strength falls by one at each hop, so alarm fronts travel through nearby prey
   and then dissipate instead of becoming a permanent global state.
 - **Warden** (wide green triangles) charges a nearby predator when another Warden is present. A
-  charging Warden glows brighter, cannot be eaten while the pair holds, and repels predators,
-  producing local pursuit reversals and defensive fronts.
+  charging Warden glows brighter, cannot be eaten while the pair holds, and repels predators.
+  Charging drains life, so Wardens surge during predator waves but cannot turn that temporary
+  advantage into permanent dominance.
 
 The default initial prey mix is 1% Pulse, 0.2% Courier, and 8% Warden. Offspring inherit their
-parent’s kind; prey that mutate into predators become standard predators.
+parent’s kind, with a rare behavioral mutation that can restore a locally extinct kind. Dense
+single-kind neighborhoods lose fitness while locally rare kinds get a smaller recovery bonus,
+creating negative frequency dependence and moving population shares. Prey that mutate into
+predators become standard predators.
 
 The native population graph tracks Standard, Pulse, Courier, Warden, and Predator populations
 as separate color-coded lines. Its legend is always visible, and hovering shows every count at
@@ -73,14 +77,15 @@ In the candidate-isolation sweep, the no-kind control averaged 699.7 frames/s. P
 696.5 frames/s (-0.46%), Courier-only 705.2 frames/s (+0.79%, within run-to-run noise), and
 Warden-only 689.2 frames/s (-1.50%). A final matched run after all tuning averaged 705.9 frames/s
 for the control and 704.7 frames/s for the combined mix, a 0.17% reduction. All kinds share the
-existing neighborhood pass; the only extra population cost is one atomic kind counter per prey.
+existing neighborhood pass. Population telemetry adds one atomic kind counter per prey, while
+diversity balancing adds two per-boid counters in the existing neighbor loop and no extra pass.
 
-In a 2,000-frame seed-42 comparison, the control peaked at 52,429 total boids and ended at 9,028
-with 925 predators. The combined mix peaked earlier at 44,293 and ended at 7,311 with 40
-predators. Wardens grew from 8% of initial prey to 51% of surviving prey as paired defense became
-an evolutionary advantage. Sampled panic activity peaked at 27,013 during high predator density
-and fell to zero after the predator collapse, showing that Courier alarms dissipate when their
-source disappears.
+In a 50,000-frame seed-42 stability run with 20,000 initial boids, all four behavioral kinds
+survived every 500-frame sample. Wardens repeatedly led during predator pressure and fell behind
+during recovery; their sampled population fell as low as 52 and recovered into the thousands
+multiple times. No post-transient prey kind exceeded half of behavioral prey for a sustained
+cycle, and predator/prey oscillations were still repeating at frame 50,000. The run averaged
+818.1 frames/s on an Apple M2 Max.
 
 ## Overview
 

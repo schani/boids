@@ -19,6 +19,11 @@ const PULSE_PERIOD: u32 = 240u;
 const PULSE_FORCE: f32 = 0.42;
 const WARDEN_CHARGE_FORCE: f32 = 2.2;
 const WARDEN_REPEL_FORCE: f32 = 45.0;
+const WARDEN_CHARGE_LIFE_COST: f32 = 2.0;
+const DIVERSITY_MIN_NEIGHBORS: u32 = 6u;
+const DIVERSITY_DOMINANCE_COST: f32 = 1.25;
+const DIVERSITY_RARITY_BONUS: f32 = 0.35;
+const KIND_SHIFT_DENOM: u32 = 2048u;
 
 const WORKGROUP_SIZE: u32 = 256u;
 const CAUSE_REPRODUCTION_SPLIT: u32 = 0u;
@@ -250,6 +255,8 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   var num_prey = 0u;
   var num_predators = 0u;
   var num_wardens = 0u;
+  var num_prey_neighbors = 0u;
+  var num_same_kind = 0u;
   var num_prey_eaten = 0u;
   var next_panic = 0u;
   if (panic_in > 0u) {
@@ -311,6 +318,10 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
             predator_center = predator_center + other.pos;
             num_predators = num_predators + 1u;
           } else {
+            num_prey_neighbors = num_prey_neighbors + 1u;
+            if (other.kind == kind) {
+              num_same_kind = num_same_kind + 1u;
+            }
             let other_panic = panic_level(other._pad);
             if (other_panic > 1u) {
               next_panic = max(next_panic, other_panic - 1u);
@@ -417,6 +428,23 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if (num_friends >= prey_gain_min_neighbors && num_friends <= prey_gain_max_neighbors) {
       next_life = next_life + 1.0;
     }
+
+    // Negative frequency dependence keeps a locally dominant kind from turning its
+    // temporary advantage into a permanent monoculture. Rare kinds get a smaller
+    // recovery bonus, so population shares continue to move instead of locking.
+    if (num_prey_neighbors >= DIVERSITY_MIN_NEIGHBORS) {
+      if (num_same_kind * 3u > num_prey_neighbors * 2u) {
+        next_life = next_life - DIVERSITY_DOMINANCE_COST;
+      } else if (num_same_kind * 4u < num_prey_neighbors) {
+        next_life = next_life + DIVERSITY_RARITY_BONUS;
+      }
+    }
+
+    // Charging is powerful but metabolically expensive. Wardens win during a
+    // predator surge, then yield ground once prolonged defense drains them.
+    if (warden_charging) {
+      next_life = next_life - WARDEN_CHARGE_LIFE_COST;
+    }
   }
 
   if (alive_out && old_age_active && next_lifetime == 0u) {
@@ -493,6 +521,12 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
           let step = 1u + (hash_u32(color_roll ^ 0x9e3779b9u) % 4u);
           child_species = (child_species + step) % 5u;
           child_pad = child_pad | COLOR_SHIFT_FLAG;
+        }
+        let kind_roll = hash_u32(seed ^ 0x6c8e9cf5u);
+        if ((kind_roll % KIND_SHIFT_DENOM) == 0u) {
+          let kind_step = 1u + (hash_u32(kind_roll ^ 0x85ebca6bu) % (PREY_KIND_COUNT - 1u));
+          child_kind = (child_kind + kind_step) % PREY_KIND_COUNT;
+          child_pad = child_pad & DEPLETION_REASON_MASK;
         }
       }
     }
