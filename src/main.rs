@@ -36,7 +36,20 @@ const PREY_LIFETIME_MAX: u32 = 2000;
 const PREDATOR_LIFETIME_MIN: u32 = 500;
 const PREDATOR_LIFETIME_MAX: u32 = 1000;
 
-const GRAPH_SERIES: usize = 2; // combined prey + predators
+const GRAPH_STANDARD: usize = 0;
+const GRAPH_PULSE: usize = 1;
+const GRAPH_COURIER: usize = 2;
+const GRAPH_WARDEN: usize = 3;
+const GRAPH_PREDATOR: usize = 4;
+const GRAPH_SERIES: usize = 5;
+const GRAPH_LABELS: [&str; GRAPH_SERIES] = ["Standard", "Pulse", "Courier", "Warden", "Predators"];
+const GRAPH_COLORS: [[u8; 3]; GRAPH_SERIES] = [
+    [45, 110, 255],
+    [255, 184, 13],
+    [255, 31, 184],
+    [38, 230, 89],
+    [255, 68, 68],
+];
 const PREY_SPECIES_COUNT: usize = 5;
 const GRAPH_READBACK_INTERVAL: u32 = 4;
 const GRAPH_HEIGHT_PX: u32 = 200;
@@ -225,8 +238,7 @@ impl Default for CauseState {
 
 #[derive(Copy, Clone)]
 struct GraphHover {
-    prey: Option<f32>,
-    predators: Option<f32>,
+    values: [Option<f32>; GRAPH_SERIES],
     x_ui: f32,
     y_ui: f32,
 }
@@ -1328,13 +1340,33 @@ impl State {
                     }
                 });
 
+            let pixels_per_point = window.scale_factor() as f32;
+            let graph_height_px = GRAPH_HEIGHT_PX.min(self.size.height.saturating_sub(1));
+            let graph_top_ui =
+                self.size.height.saturating_sub(graph_height_px) as f32 / pixels_per_point;
+            egui::Area::new(egui::Id::new("graph_legend"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(12.0, graph_top_ui + 6.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (label, color) in GRAPH_LABELS.iter().zip(GRAPH_COLORS) {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(color[0], color[1], color[2]),
+                                    *label,
+                                );
+                            }
+                        });
+                    });
+                });
+
             if let Some(hover) = hover_info {
                 let screen = ctx.input(|i| i.screen_rect());
-                let overlay_size = egui::vec2(150.0, 66.0);
+                let overlay_size = egui::vec2(190.0, 128.0);
                 let margin = 8.0;
                 let edge_offset = 14.0;
 
-                let mut overlay_pos = egui::pos2(hover.x_ui + edge_offset, hover.y_ui - 52.0);
+                let mut overlay_pos = egui::pos2(hover.x_ui + edge_offset, hover.y_ui - 112.0);
                 if overlay_pos.x + overlay_size.x > screen.right() - margin {
                     overlay_pos.x = hover.x_ui - overlay_size.x - edge_offset;
                 }
@@ -1355,17 +1387,21 @@ impl State {
                     .fixed_pos(overlay_pos)
                     .show(ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.set_min_width(140.0);
-                            let prey_text = hover
-                                .prey
-                                .map(|v| format!("{}", v.round() as u32))
-                                .unwrap_or_else(|| "-".to_string());
-                            let pred_text = hover
-                                .predators
-                                .map(|v| format!("{}", v.round() as u32))
-                                .unwrap_or_else(|| "-".to_string());
-                            ui.add(egui::Label::new(format!("Prey: {prey_text}")).wrap(false));
-                            ui.add(egui::Label::new(format!("Predators: {pred_text}")).wrap(false));
+                            ui.set_min_width(175.0);
+                            for ((label, color), value) in
+                                GRAPH_LABELS.iter().zip(GRAPH_COLORS).zip(hover.values)
+                            {
+                                let value = value
+                                    .map(|v| format!("{}", v.round() as u32))
+                                    .unwrap_or_else(|| "-".to_string());
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(color[0], color[1], color[2]),
+                                        *label,
+                                    );
+                                    ui.label(value);
+                                });
+                            }
                         });
                     });
             }
@@ -1525,8 +1561,18 @@ impl State {
                     self.audio_mapper
                         .update_populations(prey_count, predator_count);
                     let width_limit = self.graph_width_limit();
-                    self.add_graph_point(0, prey_count as f32, width_limit);
-                    self.add_graph_point(1, predator_count as f32, width_limit);
+                    let mut graph_counts = [0u32; GRAPH_SERIES];
+                    graph_counts[GRAPH_STANDARD] =
+                        counts[KIND_POPULATION_START + KIND_STANDARD as usize];
+                    graph_counts[GRAPH_PULSE] = counts[KIND_POPULATION_START + KIND_PULSE as usize];
+                    graph_counts[GRAPH_COURIER] =
+                        counts[KIND_POPULATION_START + KIND_COURIER as usize];
+                    graph_counts[GRAPH_WARDEN] =
+                        counts[KIND_POPULATION_START + KIND_WARDEN as usize];
+                    graph_counts[GRAPH_PREDATOR] = predator_count;
+                    for (series, count) in graph_counts.into_iter().enumerate() {
+                        self.add_graph_point(series, count as f32, width_limit);
+                    }
                 }
                 self.update_graph_vertices();
             }
@@ -1812,12 +1858,6 @@ impl State {
             (graph_height - 2.0 * GRAPH_PADDING_PX).max(1.0),
         ];
 
-        // Match the original graph behavior: one prey line and one predator line.
-        let colors: [[f32; 3]; GRAPH_SERIES] = [
-            [0.0, 0.0, 1.0], // prey
-            [1.0, 0.0, 0.0], // predators
-        ];
-
         let mut vertices = Vec::new();
         self.graph.vertex_counts = [0u32; GRAPH_SERIES];
         for s in 0..GRAPH_SERIES {
@@ -1826,7 +1866,7 @@ impl State {
                 continue;
             }
 
-            let color = colors[s];
+            let color = GRAPH_COLORS[s].map(|channel| channel as f32 / 255.0);
             let denom = self.graph.series_max[s].max(1.0);
             for i in 0..(history.len() - 1) {
                 // Align to the right edge, one x-unit per sample, like the original canvas graph.
@@ -1915,16 +1955,15 @@ impl State {
         let inner_w = (self.size.width as f32 - 2.0 * GRAPH_PADDING_PX).max(1.0);
         let local_x = cursor[0];
 
-        let prey = Self::sample_history_at_x(&self.graph.history[0], local_x, inner_x, inner_w);
-        let predators =
-            Self::sample_history_at_x(&self.graph.history[1], local_x, inner_x, inner_w);
-        if prey.is_none() && predators.is_none() {
+        let values = std::array::from_fn(|series| {
+            Self::sample_history_at_x(&self.graph.history[series], local_x, inner_x, inner_w)
+        });
+        if values.iter().all(Option::is_none) {
             return None;
         }
 
         Some(GraphHover {
-            prey,
-            predators,
+            values,
             x_ui: cursor[0] / pixels_per_point,
             y_ui: cursor[1] / pixels_per_point,
         })

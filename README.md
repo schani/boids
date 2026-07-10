@@ -62,6 +62,10 @@ structure. They reuse the neighbor checks already performed for flocking:
 The default initial prey mix is 1% Pulse, 0.2% Courier, and 8% Warden. Offspring inherit their
 parent’s kind; prey that mutate into predators become standard predators.
 
+The native population graph tracks Standard, Pulse, Courier, Warden, and Predator populations
+as separate color-coded lines. Its legend is always visible, and hovering shows every count at
+the selected point in time.
+
 #### Measured cost and population behavior
 
 Optimized Metal runs on an Apple M2 Max used 32,000 initial boids, 300 frames, and three seeds.
