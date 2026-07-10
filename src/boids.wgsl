@@ -1,5 +1,24 @@
 const FLAG_PREDATOR: u32 = 1u;
 const FLAG_ALIVE: u32 = 2u;
+const FLAG_WARDEN_CHARGING: u32 = 4u;
+
+const KIND_STANDARD: u32 = 0u;
+const KIND_PULSE: u32 = 1u;
+const KIND_COURIER: u32 = 2u;
+const KIND_WARDEN: u32 = 3u;
+const PREY_KIND_COUNT: u32 = 4u;
+
+const PANIC_SHIFT: u32 = 8u;
+const PANIC_MASK: u32 = 0x0000ff00u;
+const PANIC_MAX: u32 = 12u;
+const DEPLETION_REASON_MASK: u32 = 0x000000ffu;
+const PULSE_STATE_SHIFT: u32 = 16u;
+const PULSE_STATE_MASK: u32 = 0x00ff0000u;
+
+const PULSE_PERIOD: u32 = 240u;
+const PULSE_FORCE: f32 = 0.42;
+const WARDEN_CHARGE_FORCE: f32 = 2.2;
+const WARDEN_REPEL_FORCE: f32 = 45.0;
 
 const WORKGROUP_SIZE: u32 = 256u;
 const CAUSE_REPRODUCTION_SPLIT: u32 = 0u;
@@ -24,8 +43,11 @@ const PREY_LIFETIME_RANGE: u32 = 1001u;
 const PREDATOR_LIFETIME_MIN: u32 = 500u;
 const PREDATOR_LIFETIME_RANGE: u32 = 501u;
 const PREY_SPECIES_COUNT: u32 = 5u;
-const POPULATION_SERIES: u32 = PREY_SPECIES_COUNT + 1u;
 const PREDATOR_POPULATION_INDEX: u32 = PREY_SPECIES_COUNT;
+const KIND_POPULATION_START: u32 = PREDATOR_POPULATION_INDEX + 1u;
+const PANICKED_POPULATION_INDEX: u32 = KIND_POPULATION_START + PREY_KIND_COUNT;
+const CHARGING_WARDEN_POPULATION_INDEX: u32 = PANICKED_POPULATION_INDEX + 1u;
+const POPULATION_SERIES: u32 = CHARGING_WARDEN_POPULATION_INDEX + 1u;
 
 struct Boid {
   pos: vec2<f32>,
@@ -35,7 +57,7 @@ struct Boid {
   species: u32,
   flags: u32,
   _pad: u32,
-  _pad2: u32,
+  kind: u32,
 };
 
 struct Params {
@@ -108,6 +130,14 @@ fn random_lifetime(seed: u32, predator: bool) -> u32 {
   let prey_lifetime = PREY_LIFETIME_MIN + (h % PREY_LIFETIME_RANGE);
   let predator_lifetime = PREDATOR_LIFETIME_MIN + (h % PREDATOR_LIFETIME_RANGE);
   return select(prey_lifetime, predator_lifetime, predator);
+}
+
+fn panic_level(packed: u32) -> u32 {
+  return (packed & PANIC_MASK) >> PANIC_SHIFT;
+}
+
+fn pulse_tick(packed: u32) -> u32 {
+  return (packed & PULSE_STATE_MASK) >> PULSE_STATE_SHIFT;
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -193,11 +223,15 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let predator = (b.flags & FLAG_PREDATOR) != 0u;
+  let kind = select(b.kind % PREY_KIND_COUNT, KIND_STANDARD, predator);
+  let panic_in = select(panic_level(b._pad), 0u, predator);
 
   let life_for_motion = select(b.life, min(b.life, params.start_life), predator);
   var target_velocity = params.max_velocity;
   if (predator) {
     target_velocity = target_velocity * params.predator_speed_bonus;
+  } else if (panic_in > 0u) {
+    target_velocity = target_velocity * 1.35;
   }
   target_velocity = target_velocity
     * (1.0 + (life_for_motion - params.start_life) / params.start_life / 2.0);
@@ -209,9 +243,18 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   var align_steer = vec2(0.0, 0.0);
   var cohesion_steer = vec2(0.0, 0.0);
   var separation_steer = vec2(0.0, 0.0);
+  var pulse_steer = vec2(0.0, 0.0);
+  var warden_repulsion = vec2(0.0, 0.0);
+  var predator_center = vec2(0.0, 0.0);
   var num_friends = 0u;
   var num_prey = 0u;
+  var num_predators = 0u;
+  var num_wardens = 0u;
   var num_prey_eaten = 0u;
+  var next_panic = 0u;
+  if (panic_in > 0u) {
+    next_panic = panic_in - 1u;
+  }
   var was_eaten = false;
 
   let cx = i32(b.pos.x / params.cell_size);
@@ -236,26 +279,49 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dist = length(diff);
         if (dist >= params.radius || dist <= 0.0001) { continue; }
 
+        let other_predator = (other.flags & FLAG_PREDATOR) != 0u;
+        if (!other_predator && other.kind == KIND_PULSE) {
+          let pulse_position = f32(pulse_tick(other._pad)) / f32(PULSE_PERIOD);
+          let wave = sin(pulse_position * 6.28318530718);
+          pulse_steer = pulse_steer - normalize_or_zero(diff) * wave * PULSE_FORCE;
+        }
+
         if (predator) {
-          if ((other.flags & FLAG_PREDATOR) == 0u) {
-            if (dist < params.predator_distance) {
+          if (!other_predator) {
+            let charging_warden = (other.flags & FLAG_WARDEN_CHARGING) != 0u;
+            if (dist < params.predator_distance && !charging_warden) {
               num_prey_eaten = num_prey_eaten + 1u;
             }
             num_prey = num_prey + 1u;
             cohesion_steer = cohesion_steer + other.pos;
+            if (charging_warden) {
+              let inv = 1.0 / dist;
+              warden_repulsion = warden_repulsion
+                + diff * (WARDEN_REPEL_FORCE * inv * inv);
+            }
           }
         } else {
           let inv = 1.0 / dist;
           var steer = diff * (params.separation_coeff * inv * inv);
-          if ((other.flags & FLAG_PREDATOR) != 0u) {
+          if (other_predator) {
             if (dist < params.predator_distance) {
               was_eaten = true;
             }
             steer = steer * params.prey_avoidance_bonus;
+            predator_center = predator_center + other.pos;
+            num_predators = num_predators + 1u;
+          } else {
+            let other_panic = panic_level(other._pad);
+            if (other_panic > 1u) {
+              next_panic = max(next_panic, other_panic - 1u);
+            }
+            if (other.kind == KIND_WARDEN) {
+              num_wardens = num_wardens + 1u;
+            }
           }
           separation_steer = separation_steer + steer;
 
-          if ((other.flags & FLAG_PREDATOR) == 0u && other.species == b.species) {
+          if (!other_predator && other.species == b.species) {
             align_steer = align_steer + other.vel;
             cohesion_steer = cohesion_steer + other.pos;
             num_friends = num_friends + 1u;
@@ -265,24 +331,37 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  next_vel = next_vel + separation_steer;
+  next_vel = next_vel + separation_steer + pulse_steer;
+
+  var warden_charging = false;
+  if (!predator && kind == KIND_COURIER && num_predators > 0u) {
+    next_panic = PANIC_MAX;
+  }
+  if (!predator && kind == KIND_WARDEN && num_predators > 0u && num_wardens > 0u) {
+    predator_center = predator_center / f32(num_predators);
+    next_vel = next_vel
+      + normalize_or_zero(predator_center - b.pos) * WARDEN_CHARGE_FORCE;
+    warden_charging = true;
+    was_eaten = false;
+  }
 
   if (!predator && num_friends > 0u) {
     let inv = 1.0 / f32(num_friends);
     align_steer = align_steer * inv;
     let align = align_steer - b.vel;
-    next_vel = next_vel + normalize_or_zero(align) / 4.0;
+    let flock_divisor = select(4.0, 10.0, panic_in > 0u);
+    next_vel = next_vel + normalize_or_zero(align) / flock_divisor;
 
     cohesion_steer = cohesion_steer * inv;
     let cohesion = cohesion_steer - b.pos;
-    next_vel = next_vel + normalize_or_zero(cohesion) / 4.0;
+    next_vel = next_vel + normalize_or_zero(cohesion) / flock_divisor;
   }
 
   if (predator && num_prey > 0u) {
     let inv = 1.0 / f32(num_prey);
     cohesion_steer = cohesion_steer * inv;
     let cohesion = cohesion_steer - b.pos;
-    next_vel = next_vel + normalize_or_zero(cohesion) / 2.0;
+    next_vel = next_vel + normalize_or_zero(cohesion) / 2.0 + warden_repulsion;
   }
 
   if (b.pos.x < params.wall_distance) {
@@ -317,7 +396,7 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   var alive_out = true;
   var death_reason = DEATH_NONE;
-  var last_depletion_reason = b._pad;
+  var last_depletion_reason = b._pad & DEPLETION_REASON_MASK;
   let loneliness_active = params.loneliness_enabled != 0u;
   let overcrowding_active = params.overcrowding_enabled != 0u;
   let prey_gain_min_neighbors = min(params.prey_gain_min_neighbors, params.prey_gain_max_neighbors);
@@ -355,7 +434,10 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  var out_flags = b.flags;
+  var out_flags = b.flags & ~FLAG_WARDEN_CHARGING;
+  if (warden_charging) {
+    out_flags = out_flags | FLAG_WARDEN_CHARGING;
+  }
   if (!alive_out) {
     out_flags = out_flags & ~FLAG_ALIVE;
     let slot = atomicAdd(&dead_new_count, 1u);
@@ -363,8 +445,15 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let next_pos = b.pos + next_vel;
-  let out_pad = select(0u, last_depletion_reason, alive_out);
-  boid_out[idx] = Boid(next_pos, next_vel, next_life, next_lifetime, b.species, out_flags, out_pad, b._pad2);
+  var next_pulse_tick = 0u;
+  if (!predator && kind == KIND_PULSE) {
+    next_pulse_tick = (pulse_tick(b._pad) + 1u) % PULSE_PERIOD;
+  }
+  let packed_state = last_depletion_reason
+    | (next_panic << PANIC_SHIFT)
+    | (next_pulse_tick << PULSE_STATE_SHIFT);
+  let out_pad = select(0u, packed_state, alive_out);
+  boid_out[idx] = Boid(next_pos, next_vel, next_life, next_lifetime, b.species, out_flags, out_pad, kind);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -377,13 +466,14 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (b.life <= threshold) { return; }
 
   let half_life = b.life * 0.5;
-  boid_out[idx] = Boid(b.pos, b.vel, half_life, b.lifetime, b.species, b.flags, b._pad, b._pad2);
+  boid_out[idx] = Boid(b.pos, b.vel, half_life, b.lifetime, b.species, b.flags, b._pad, b.kind);
 
   let slot = atomicAdd(&spawn_count, 1u);
   if (slot < params.capacity) {
     var child_species = b.species;
-    var child_flags = b.flags;
+    var child_flags = b.flags & ~FLAG_WARDEN_CHARGING;
     var child_pad = b._pad;
+    var child_kind = b.kind;
     let seed =
       idx ^ slot ^
       bitcast<u32>(b.pos.x) ^ bitcast<u32>(b.pos.y) ^
@@ -394,6 +484,7 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
       if ((hash_u32(seed) % denom) == 0u) {
         child_flags = (child_flags | FLAG_PREDATOR);
         child_species = 0u;
+        child_kind = KIND_STANDARD;
         child_pad = child_pad | MUTATION_FLAG;
       } else {
         let color_roll = hash_u32(seed ^ 0xa511e9b3u);
@@ -415,7 +506,7 @@ fn reproduce_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
       child_species,
       child_flags,
       child_pad,
-      0u
+      child_kind
     );
   } else {
     atomicAdd(&cause_counts[CAUSE_BIRTH_DROPPED], 1u);
@@ -439,8 +530,8 @@ fn apply_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
       spawn.lifetime,
       spawn.species,
       spawn.flags,
-      spawn._pad & ~(MUTATION_FLAG | COLOR_SHIFT_FLAG),
-      spawn._pad2
+      spawn._pad & ~(MUTATION_FLAG | COLOR_SHIFT_FLAG | PANIC_MASK),
+      spawn.kind
     );
     atomicAdd(&cause_counts[CAUSE_REPRODUCTION_SPLIT], 1u);
     if ((spawn._pad & MUTATION_FLAG) != 0u) {
@@ -508,6 +599,13 @@ fn count_species(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicAdd(&species_counts[PREDATOR_POPULATION_INDEX], 1u);
   } else {
     atomicAdd(&species_counts[b.species % PREY_SPECIES_COUNT], 1u);
+    atomicAdd(&species_counts[KIND_POPULATION_START + (b.kind % PREY_KIND_COUNT)], 1u);
+    if (panic_level(b._pad) > 0u) {
+      atomicAdd(&species_counts[PANICKED_POPULATION_INDEX], 1u);
+    }
+    if ((b.flags & FLAG_WARDEN_CHARGING) != 0u) {
+      atomicAdd(&species_counts[CHARGING_WARDEN_POPULATION_INDEX], 1u);
+    }
   }
 }
 
@@ -525,6 +623,8 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     return VsOut(vec4(2.0, 2.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0), 0.0);
   }
 
+  let predator = (b.flags & FLAG_PREDATOR) != 0u;
+  let kind = select(b.kind % PREY_KIND_COUNT, KIND_STANDARD, predator);
   var local: vec2<f32>;
   if (vid == 0u) {
     local = vec2(20.0, 0.0);
@@ -533,6 +633,13 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   } else {
     local = vec2(-7.0, -7.0);
   }
+  if (kind == KIND_COURIER) {
+    local.x = select(-9.0, 30.0, vid == 0u);
+    local.y = select(select(-4.0, 4.0, vid == 1u), 0.0, vid == 0u);
+  } else if (kind == KIND_WARDEN) {
+    local.x = select(-8.0, 19.0, vid == 0u);
+    local.y = select(select(-12.0, 12.0, vid == 1u), 0.0, vid == 0u);
+  }
 
   let v = b.vel;
   let vlen = length(v);
@@ -540,9 +647,13 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   let sinv = dir.y;
   let cosv = dir.x;
 
-  let life_for_size = select(b.life, min(b.life, params.start_life), (b.flags & FLAG_PREDATOR) != 0u);
+  let life_for_size = select(b.life, min(b.life, params.start_life), predator);
   var scale = 0.5 + 0.5 * (life_for_size / 600.0);
-  if ((b.flags & FLAG_PREDATOR) != 0u) {
+  if (kind == KIND_PULSE) {
+    let pulse_position = f32(pulse_tick(b._pad)) / f32(PULSE_PERIOD);
+    scale = scale * (1.0 + 0.32 * sin(pulse_position * 6.28318530718));
+  }
+  if (predator) {
     scale = scale * 2.0;
   }
 
@@ -567,7 +678,20 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   } else if (s == 4u) {
     color = vec3(0.478, 0.475, 1.0);
   }
-  if ((b.flags & FLAG_PREDATOR) != 0u) {
+  if (kind == KIND_PULSE) {
+    color = vec3(1.0, 0.72, 0.05);
+  } else if (kind == KIND_COURIER) {
+    color = vec3(1.0, 0.12, 0.72);
+  } else if (kind == KIND_WARDEN) {
+    color = select(
+      vec3(0.08, 0.72, 0.24),
+      vec3(0.15, 1.0, 0.35),
+      (b.flags & FLAG_WARDEN_CHARGING) != 0u
+    );
+  } else if (panic_level(b._pad) > 0u) {
+    color = mix(color, vec3(1.0, 0.35, 0.05), 0.55);
+  }
+  if (predator) {
     color = vec3(1.0, 0.267, 0.267);
   }
 

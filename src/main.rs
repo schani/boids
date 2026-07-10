@@ -38,8 +38,6 @@ const PREDATOR_LIFETIME_MAX: u32 = 1000;
 
 const GRAPH_SERIES: usize = 2; // combined prey + predators
 const PREY_SPECIES_COUNT: usize = 5;
-const POPULATION_SERIES: usize = PREY_SPECIES_COUNT + 1;
-const PREDATOR_POPULATION_INDEX: usize = PREY_SPECIES_COUNT;
 const GRAPH_READBACK_INTERVAL: u32 = 4;
 const GRAPH_HEIGHT_PX: u32 = 200;
 const GRAPH_PADDING_PX: f32 = 16.0;
@@ -62,7 +60,22 @@ const AUDIO_CONTROL_WINDOW_SEC: f32 = 0.10;
 const FLAG_PREDATOR: u32 = 1 << 0;
 const FLAG_ALIVE: u32 = 1 << 1;
 
+const KIND_STANDARD: u32 = 0;
+const KIND_PULSE: u32 = 1;
+const KIND_COURIER: u32 = 2;
+const KIND_WARDEN: u32 = 3;
+const PREY_KIND_COUNT: usize = 4;
+const PULSE_STATE_SHIFT: u32 = 16;
+const PULSE_PERIOD: u32 = 240;
+
+const PREDATOR_POPULATION_INDEX: usize = PREY_SPECIES_COUNT;
+const KIND_POPULATION_START: usize = PREDATOR_POPULATION_INDEX + 1;
+const PANICKED_POPULATION_INDEX: usize = KIND_POPULATION_START + PREY_KIND_COUNT;
+const CHARGING_WARDEN_POPULATION_INDEX: usize = PANICKED_POPULATION_INDEX + 1;
+const POPULATION_SERIES: usize = CHARGING_WARDEN_POPULATION_INDEX + 1;
+
 const WORKGROUP_SIZE: u32 = 256;
+const HEADLESS_MAX_BATCH_FRAMES: u64 = 64;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -74,7 +87,7 @@ struct Boid {
     species: u32,
     flags: u32,
     _pad: u32,
-    _pad2: u32,
+    kind: u32,
 }
 
 #[repr(C)]
@@ -278,13 +291,31 @@ enum HeadlessFormat {
     Jsonl,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct HeadlessOptions {
     frames: u64,
     sample_every: u64,
     seed: u64,
     initial_count: u32,
+    mix: InitialMix,
     format: HeadlessFormat,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct InitialMix {
+    pulse_ratio: f32,
+    courier_ratio: f32,
+    warden_ratio: f32,
+}
+
+impl Default for InitialMix {
+    fn default() -> Self {
+        Self {
+            pulse_ratio: 0.01,
+            courier_ratio: 0.002,
+            warden_ratio: 0.08,
+        }
+    }
 }
 
 impl Default for HeadlessOptions {
@@ -294,6 +325,7 @@ impl Default for HeadlessOptions {
             sample_every: 100,
             seed: 1,
             initial_count: INITIAL_COUNT,
+            mix: InitialMix::default(),
             format: HeadlessFormat::Csv,
         }
     }
@@ -306,7 +338,12 @@ enum RunMode {
 }
 
 impl State {
-    async fn new(window: Option<&winit::window::Window>, initial_count: u32, seed: u64) -> Self {
+    async fn new(
+        window: Option<&winit::window::Window>,
+        initial_count: u32,
+        seed: u64,
+        mix: InitialMix,
+    ) -> Self {
         assert!(initial_count <= BOID_CAPACITY);
         let size = window
             .map(winit::window::Window::inner_size)
@@ -427,7 +464,7 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        let initial_boids = create_initial_boids(initial_count, seed);
+        let initial_boids = create_initial_boids(initial_count, seed, mix);
         let boid_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("boids_a"),
             size: (std::mem::size_of::<Boid>() as u64) * BOID_CAPACITY as u64,
@@ -1683,10 +1720,11 @@ impl State {
             .ok_or_else(|| "failed to read initial population from GPU".to_string())
     }
 
-    fn run_headless_frames(
+    fn run_headless_batch(
         &mut self,
         frame_count: u64,
-    ) -> Result<[u32; POPULATION_SERIES], String> {
+        read_population: bool,
+    ) -> Result<Option<[u32; POPULATION_SERIES]>, String> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1696,10 +1734,17 @@ impl State {
             self.run_compute_passes(&mut encoder);
             self.current = 1 - self.current;
         }
-        self.copy_population_to_readback(&mut encoder);
+        if read_population {
+            self.copy_population_to_readback(&mut encoder);
+        }
         self.queue.submit(Some(encoder.finish()));
-        self.read_population_counts()
-            .ok_or_else(|| "failed to read population from GPU".to_string())
+        if read_population {
+            self.read_population_counts()
+                .map(Some)
+                .ok_or_else(|| "failed to read population from GPU".to_string())
+        } else {
+            Ok(None)
+        }
     }
 
     fn copy_population_to_readback(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -2059,7 +2104,7 @@ fn bind_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
-fn create_initial_boids(initial_count: u32, seed: u64) -> Vec<Boid> {
+fn create_initial_boids(initial_count: u32, seed: u64, mix: InitialMix) -> Vec<Boid> {
     let predator_count = (initial_count as f32 * PREDATOR_RATIO).round() as u32;
     let mut rng = StdRng::seed_from_u64(seed);
     let mut boids = Vec::with_capacity(BOID_CAPACITY as usize);
@@ -2070,7 +2115,26 @@ fn create_initial_boids(initial_count: u32, seed: u64) -> Vec<Boid> {
         } else {
             rng.gen_range(0..PREY_SPECIES_COUNT as u32)
         };
+        let kind = if predator {
+            KIND_STANDARD
+        } else {
+            let roll = rng.gen_range(0.0..1.0);
+            if roll < mix.pulse_ratio {
+                KIND_PULSE
+            } else if roll < mix.pulse_ratio + mix.courier_ratio {
+                KIND_COURIER
+            } else if roll < mix.pulse_ratio + mix.courier_ratio + mix.warden_ratio {
+                KIND_WARDEN
+            } else {
+                KIND_STANDARD
+            }
+        };
         let flags = FLAG_ALIVE | if predator { FLAG_PREDATOR } else { 0 };
+        let pulse_state = if kind == KIND_PULSE {
+            ((i.wrapping_mul(73) ^ seed as u32) % PULSE_PERIOD) << PULSE_STATE_SHIFT
+        } else {
+            0
+        };
         let life = START_LIFE;
         let lifetime = if predator {
             rng.gen_range(PREDATOR_LIFETIME_MIN..=PREDATOR_LIFETIME_MAX)
@@ -2090,8 +2154,8 @@ fn create_initial_boids(initial_count: u32, seed: u64) -> Vec<Boid> {
             lifetime,
             species,
             flags,
-            _pad: 0,
-            _pad2: 0,
+            _pad: pulse_state,
+            kind,
         });
     }
     for _ in initial_count..BOID_CAPACITY {
@@ -2103,7 +2167,7 @@ fn create_initial_boids(initial_count: u32, seed: u64) -> Vec<Boid> {
             species: 0,
             flags: 0,
             _pad: 0,
-            _pad2: 0,
+            kind: KIND_STANDARD,
         });
     }
     boids
@@ -2161,6 +2225,15 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode, Str
                     .parse()
                     .map_err(|_| format!("invalid initial count: {value}"))?;
             }
+            "--pulse-ratio" => {
+                options.mix.pulse_ratio = parse_ratio("pulse", value)?;
+            }
+            "--courier-ratio" => {
+                options.mix.courier_ratio = parse_ratio("courier", value)?;
+            }
+            "--warden-ratio" => {
+                options.mix.warden_ratio = parse_ratio("warden", value)?;
+            }
             "--format" => {
                 options.format = match value.as_str() {
                     "csv" => HeadlessFormat::Csv,
@@ -2181,7 +2254,24 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode, Str
             "--initial-count cannot exceed the capacity of {BOID_CAPACITY}"
         ));
     }
+    let special_ratio =
+        options.mix.pulse_ratio + options.mix.courier_ratio + options.mix.warden_ratio;
+    if special_ratio > 1.0 {
+        return Err(format!(
+            "pulse, courier, and warden ratios must total at most 1.0 (got {special_ratio})"
+        ));
+    }
     Ok(RunMode::Headless(options))
+}
+
+fn parse_ratio(name: &str, value: &str) -> Result<f32, String> {
+    let ratio: f32 = value
+        .parse()
+        .map_err(|_| format!("invalid {name} ratio: {value}"))?;
+    if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+        return Err(format!("{name} ratio must be between 0.0 and 1.0"));
+    }
+    Ok(ratio)
 }
 
 fn print_usage() {
@@ -2195,57 +2285,101 @@ fn print_usage() {
            --sample-every N    Emit population every N frames (default: 100)\n\
            --seed N            Initial population seed (default: 1)\n\
            --initial-count N   Initial boids, max {BOID_CAPACITY} (default: {INITIAL_COUNT})\n\
+           --pulse-ratio R     Initial fraction of prey that pulse (default: 0.01)\n\
+           --courier-ratio R   Initial fraction of prey that carry panic (default: 0.002)\n\
+           --warden-ratio R    Initial fraction of prey that defend (default: 0.08)\n\
            --format FORMAT     csv or jsonl (default: csv)\n\
            -h, --help          Show this help"
     );
 }
 
 fn emit_population(format: HeadlessFormat, frame: u64, counts: &[u32; POPULATION_SERIES]) {
-    let total: u32 = counts.iter().sum();
+    let total: u32 =
+        counts[..PREY_SPECIES_COUNT].iter().sum::<u32>() + counts[PREDATOR_POPULATION_INDEX];
     match format {
         HeadlessFormat::Csv => println!(
-            "{frame},{},{},{},{},{},{},{total}",
+            "{frame},{},{},{},{},{},{},{},{},{},{},{},{},{total}",
             counts[0],
             counts[1],
             counts[2],
             counts[3],
             counts[4],
-            counts[PREDATOR_POPULATION_INDEX]
+            counts[PREDATOR_POPULATION_INDEX],
+            counts[KIND_POPULATION_START + KIND_STANDARD as usize],
+            counts[KIND_POPULATION_START + KIND_PULSE as usize],
+            counts[KIND_POPULATION_START + KIND_COURIER as usize],
+            counts[KIND_POPULATION_START + KIND_WARDEN as usize],
+            counts[PANICKED_POPULATION_INDEX],
+            counts[CHARGING_WARDEN_POPULATION_INDEX]
         ),
         HeadlessFormat::Jsonl => println!(
-            "{{\"frame\":{frame},\"populations\":{{\"prey_0\":{},\"prey_1\":{},\"prey_2\":{},\"prey_3\":{},\"prey_4\":{},\"predators\":{}}},\"total\":{total}}}",
+            "{{\"frame\":{frame},\"populations\":{{\"prey_0\":{},\"prey_1\":{},\"prey_2\":{},\"prey_3\":{},\"prey_4\":{},\"predators\":{},\"standard\":{},\"pulse\":{},\"courier\":{},\"warden\":{}}},\"activity\":{{\"panicked\":{},\"charging_wardens\":{}}},\"total\":{total}}}",
             counts[0],
             counts[1],
             counts[2],
             counts[3],
             counts[4],
-            counts[PREDATOR_POPULATION_INDEX]
+            counts[PREDATOR_POPULATION_INDEX],
+            counts[KIND_POPULATION_START + KIND_STANDARD as usize],
+            counts[KIND_POPULATION_START + KIND_PULSE as usize],
+            counts[KIND_POPULATION_START + KIND_COURIER as usize],
+            counts[KIND_POPULATION_START + KIND_WARDEN as usize],
+            counts[PANICKED_POPULATION_INDEX],
+            counts[CHARGING_WARDEN_POPULATION_INDEX]
         ),
     }
 }
 
 async fn run_headless(options: HeadlessOptions) -> Result<(), String> {
     let started = Instant::now();
-    let mut state = State::new(None, options.initial_count, options.seed).await;
+    let mut state = State::new(None, options.initial_count, options.seed, options.mix).await;
+    let initialization_elapsed = started.elapsed();
     eprintln!(
-        "Headless run: frames={}, sample_every={}, seed={}, initial_count={}, format={:?}",
-        options.frames, options.sample_every, options.seed, options.initial_count, options.format
+        "Headless run: frames={}, sample_every={}, seed={}, initial_count={}, pulse_ratio={}, courier_ratio={}, warden_ratio={}, format={:?}",
+        options.frames,
+        options.sample_every,
+        options.seed,
+        options.initial_count,
+        options.mix.pulse_ratio,
+        options.mix.courier_ratio,
+        options.mix.warden_ratio,
+        options.format
     );
     if options.format == HeadlessFormat::Csv {
-        println!("frame,prey_0,prey_1,prey_2,prey_3,prey_4,predators,total");
+        println!(
+            "frame,prey_0,prey_1,prey_2,prey_3,prey_4,predators,standard,pulse,courier,warden,panicked,charging_wardens,total"
+        );
     }
 
     let initial = state.read_current_population()?;
     emit_population(options.format, 0, &initial);
 
+    let simulation_started = Instant::now();
     let mut frame = 0;
     while frame < options.frames {
-        let chunk = options.sample_every.min(options.frames - frame);
-        let counts = state.run_headless_frames(chunk)?;
-        frame += chunk;
+        let sample_frame = (frame + options.sample_every).min(options.frames);
+        let mut counts = None;
+        while frame < sample_frame {
+            let batch = HEADLESS_MAX_BATCH_FRAMES.min(sample_frame - frame);
+            let reaches_sample = frame + batch == sample_frame;
+            counts = state.run_headless_batch(batch, reaches_sample)?;
+            frame += batch;
+        }
+        let counts = counts.ok_or_else(|| "population sample was not produced".to_string())?;
         emit_population(options.format, frame, &counts);
     }
-    eprintln!("Completed in {:.3}s", started.elapsed().as_secs_f64());
+    let simulation_elapsed = simulation_started.elapsed();
+    let frames_per_second = if simulation_elapsed.is_zero() {
+        0.0
+    } else {
+        options.frames as f64 / simulation_elapsed.as_secs_f64()
+    };
+    eprintln!(
+        "Completed: initialization={:.3}s, simulation={:.3}s, throughput={frames_per_second:.1} frames/s, total={:.3}s",
+        initialization_elapsed.as_secs_f64(),
+        simulation_elapsed.as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -2261,6 +2395,7 @@ fn run_gui() {
         Some(&window),
         INITIAL_COUNT,
         rand::random::<u64>(),
+        InitialMix::default(),
     ));
 
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -2346,6 +2481,12 @@ mod tests {
                 "42",
                 "--initial-count",
                 "1000",
+                "--pulse-ratio",
+                "0.03",
+                "--courier-ratio",
+                "0.004",
+                "--warden-ratio",
+                "0.12",
                 "--format",
                 "jsonl",
             ]
@@ -2362,6 +2503,11 @@ mod tests {
                 sample_every: 25,
                 seed: 42,
                 initial_count: 1000,
+                mix: InitialMix {
+                    pulse_ratio: 0.03,
+                    courier_ratio: 0.004,
+                    warden_ratio: 0.12,
+                },
                 format: HeadlessFormat::Jsonl,
             }
         );
@@ -2370,6 +2516,23 @@ mod tests {
     #[test]
     fn rejects_zero_sampling_interval() {
         let result = parse_run_mode(["--headless", "--sample-every", "0"].map(str::to_string));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_species_ratios_over_one() {
+        let result = parse_run_mode(
+            [
+                "--headless",
+                "--pulse-ratio",
+                "0.4",
+                "--courier-ratio",
+                "0.3",
+                "--warden-ratio",
+                "0.31",
+            ]
+            .map(str::to_string),
+        );
         assert!(result.is_err());
     }
 }
