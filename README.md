@@ -58,13 +58,12 @@ cargo run --release -- --headless --frames 5000 --sample-every 100 \
 
 ### Emergent prey kinds
 
-Three uncommon prey kinds add large-scale motion without adding a simulation pass or spatial data
-structure. They reuse the neighbor checks already performed for flocking:
+Three uncommon prey kinds add large-scale motion and distinct ecological roles:
 
-- **Pulse** (gold, breathing triangles) continuously alternates between attracting and repelling
-  nearby boids. Offspring inherit their parent’s phase, creating local synchronized clusters,
-  while sampled translucent gold rings expose expanding and contracting pressure fields without
-  drawing a ring for every boid.
+- **Pulse** (gold, breathing triangles) injects alternating positive and negative energy into a
+  persistent 200×200 resonance field. Waves propagate, interfere, and push every boid along their
+  gradient. Boid density slows and damps waves, so flocks reshape the same field that moves them.
+  Offspring inherit phase, creating local groups of synchronized emitters.
 - **Panic Courier** (long magenta triangles) emits a short-lived panic signal after spotting a
   predator. Signal strength falls by one at each hop. Bright double-ring Courier beacons, sparse
   relay ripples, and a strength-weighted magenta tint make alarm fronts visible as they travel
@@ -84,22 +83,27 @@ The native population graph tracks Standard, Pulse, Courier, Warden, and Predato
 as separate color-coded lines. Its legend is always visible, and hovering shows every count at
 the selected point in time.
 
+#### Resonance field
+
+Two GPU buffers hold wave height, velocity, and a precomputed force gradient for each of 40,000
+field cells. Pulse deposits are folded into the existing spatial-grid build, which also supplies
+boid density to the wave solver without another per-boid pass. One pass clears deposits and one
+updates the damped wave equation each frame. The renderer displays positive crests in gold,
+negative troughs in cyan, and high-energy interference contours in white-gold beneath the boids.
+Sparse gold starbursts identify Pulse emitters, pale arrows show the force direction applied to
+boids, and a subtle green tactical-grid imprint marks current high-density flock cells that slow
+and damp propagation. With no Pulses the wave colors and force arrows remain absent; only the
+density imprint remains. The interactive and headless PNG renderers use the same field state and
+shader.
+
 #### Measured cost and population behavior
 
-Optimized Metal runs on an Apple M2 Max used 32,000 initial boids, 300 frames, and three seeds.
-In the candidate-isolation sweep, the no-kind control averaged 699.7 frames/s. Pulse-only averaged
-696.5 frames/s (-0.46%), Courier-only 705.2 frames/s (+0.79%, within run-to-run noise), and
-Warden-only 689.2 frames/s (-1.50%). A final matched run after all tuning averaged 705.9 frames/s
-for the control and 704.7 frames/s for the combined mix, a 0.17% reduction. All kinds share the
-existing neighborhood pass. Population telemetry adds one atomic kind counter per prey, while
-diversity balancing adds two per-boid counters in the existing neighbor loop and no extra pass.
-
-In a 50,000-frame seed-42 stability run with 20,000 initial boids, all four behavioral kinds
-survived every 500-frame sample. Wardens repeatedly led during predator pressure and fell behind
-during recovery; their sampled population fell as low as 52 and recovered into the thousands
-multiple times. No post-transient prey kind exceeded half of behavioral prey for a sustained
-cycle, and predator/prey oscillations were still repeating at frame 50,000. The run averaged
-818.1 frames/s on an Apple M2 Max.
+An optimized 50,000-frame seed-42 stability run on an Apple M2 Max used 20,000 initial boids and
+sampled every 2,500 frames. All four behavioral kinds survived every sample, leadership continued
+to change, and predator/prey oscillations remained active at frame 50,000. The run averaged 729.8
+frames/s versus 818.1 frames/s for the previous fieldless implementation, a 10.8% reduction. The
+field adds no separate boid-deposit pass; its remaining cost is two 40,000-cell passes and one
+precomputed-gradient read per boid. Rendering the final 1600×1000 field PNG took 16.3 ms.
 
 ## Overview
 

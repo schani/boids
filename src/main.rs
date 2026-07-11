@@ -36,6 +36,8 @@ const PREY_AVOIDANCE_BONUS: f32 = 10.0;
 const MAX_VELOCITY: f32 = 5.0;
 const PREDATOR_SPEED_BONUS: f32 = 1.9;
 const RADIUS: f32 = 100.0;
+const FIELD_GRID_SIZE: u32 = 200;
+const FIELD_CELL_COUNT: u32 = FIELD_GRID_SIZE * FIELD_GRID_SIZE;
 const PREY_GAIN_MIN_NEIGHBORS: u32 = 5;
 const PREY_GAIN_MAX_NEIGHBORS: u32 = 20;
 const PREY_COLOR_SHIFT_DENOM: u32 = 10;
@@ -139,6 +141,8 @@ struct Params {
 }
 
 struct Pipelines {
+    clear_field: wgpu::ComputePipeline,
+    update_field: wgpu::ComputePipeline,
     clear_grid: wgpu::ComputePipeline,
     reset_dead: wgpu::ComputePipeline,
     build_counts: wgpu::ComputePipeline,
@@ -151,6 +155,7 @@ struct Pipelines {
     merge_dead: wgpu::ComputePipeline,
     clear_species: wgpu::ComputePipeline,
     count_species: wgpu::ComputePipeline,
+    field: wgpu::RenderPipeline,
     effects: wgpu::RenderPipeline,
     render: wgpu::RenderPipeline,
     graph: wgpu::RenderPipeline,
@@ -159,6 +164,8 @@ struct Pipelines {
 struct Buffers {
     params: wgpu::Buffer,
     boids: [wgpu::Buffer; 2],
+    field: [wgpu::Buffer; 2],
+    field_deposits: wgpu::Buffer,
     grid_counts: wgpu::Buffer,
     grid_offsets: wgpu::Buffer,
     grid_offsets_write: wgpu::Buffer,
@@ -177,6 +184,9 @@ struct Buffers {
 }
 
 struct BindGroups {
+    clear_field: wgpu::BindGroup,
+    update_field: [wgpu::BindGroup; 2],
+    field: [wgpu::BindGroup; 2],
     reset_dead: wgpu::BindGroup,
     clear_grid: wgpu::BindGroup,
     scan: wgpu::BindGroup,
@@ -190,6 +200,14 @@ struct BindGroups {
     reproduce: [wgpu::BindGroup; 2],
     apply_spawns: [wgpu::BindGroup; 2],
     render: [wgpu::BindGroup; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct FieldCell {
+    height: f32,
+    velocity: f32,
+    gradient: [f32; 2],
 }
 
 #[repr(C)]
@@ -424,7 +442,10 @@ impl State {
                 &wgpu::DeviceDescriptor {
                     label: Some("device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: wgpu::Limits {
+                        max_storage_buffers_per_shader_stage: 9,
+                        ..wgpu::Limits::default()
+                    },
                 },
                 None,
             )
@@ -506,6 +527,29 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let field_buffer_size = FIELD_CELL_COUNT as u64 * std::mem::size_of::<FieldCell>() as u64;
+        let field_a = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resonance_field_a"),
+            size: field_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let field_b = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resonance_field_b"),
+            size: field_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let field_deposits = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resonance_field_deposits"),
+            size: FIELD_CELL_COUNT as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let empty_field = vec![FieldCell::zeroed(); FIELD_CELL_COUNT as usize];
+        queue.write_buffer(&field_a, 0, bytemuck::cast_slice(&empty_field));
+        queue.write_buffer(&field_b, 0, bytemuck::cast_slice(&empty_field));
 
         let grid_counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("grid_counts"),
@@ -631,6 +675,21 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("boids.wgsl").into()),
         });
 
+        let clear_field_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("clear_field_bgl"),
+            entries: &[storage_entry(17, false, wgpu::ShaderStages::COMPUTE)],
+        });
+        let update_field_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("update_field_bgl"),
+            entries: &[
+                storage_entry(0, true, wgpu::ShaderStages::COMPUTE),
+                storage_entry(3, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(15, true, wgpu::ShaderStages::COMPUTE),
+                storage_entry(16, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(17, false, wgpu::ShaderStages::COMPUTE),
+            ],
+        });
+
         let reset_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("reset_bgl"),
             entries: &[
@@ -652,6 +711,7 @@ impl State {
                 storage_entry(0, true, wgpu::ShaderStages::COMPUTE),
                 storage_entry(1, true, wgpu::ShaderStages::COMPUTE),
                 storage_entry(3, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(17, false, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let scan_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -690,6 +750,7 @@ impl State {
                 storage_entry(6, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(9, false, wgpu::ShaderStages::COMPUTE),
                 storage_entry(10, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(15, true, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let reproduce_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -744,6 +805,25 @@ impl State {
                 storage_entry(0, true, wgpu::ShaderStages::VERTEX),
                 storage_entry(1, true, wgpu::ShaderStages::VERTEX),
             ],
+        });
+        let field_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("field_bgl"),
+            entries: &[
+                storage_entry(0, true, wgpu::ShaderStages::FRAGMENT),
+                storage_entry(3, false, wgpu::ShaderStages::FRAGMENT),
+                storage_entry(15, true, wgpu::ShaderStages::FRAGMENT),
+            ],
+        });
+
+        let clear_field_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("clear_field_layout"),
+            bind_group_layouts: &[&clear_field_bgl],
+            push_constant_ranges: &[],
+        });
+        let update_field_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("update_field_layout"),
+            bind_group_layouts: &[&update_field_bgl],
+            push_constant_ranges: &[],
         });
 
         let reset_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -811,8 +891,25 @@ impl State {
             bind_group_layouts: &[&render_bgl],
             push_constant_ranges: &[],
         });
+        let field_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("field_layout"),
+            bind_group_layouts: &[&field_bgl],
+            push_constant_ranges: &[],
+        });
 
         let pipelines = Pipelines {
+            clear_field: compute_pipeline(
+                &device,
+                &shader,
+                &clear_field_layout,
+                "clear_resonance_field",
+            ),
+            update_field: compute_pipeline(
+                &device,
+                &shader,
+                &update_field_layout,
+                "update_resonance_field",
+            ),
             clear_grid: compute_pipeline(&device, &shader, &clear_layout, "clear_grid_counts"),
             reset_dead: compute_pipeline(&device, &shader, &reset_layout, "reset_dead_new"),
             build_counts: compute_pipeline(&device, &shader, &build_layout, "build_grid_counts"),
@@ -835,15 +932,19 @@ impl State {
                 &count_species_layout,
                 "count_species",
             ),
+            field: field_pipeline(&device, &shader, &field_layout, surface_format),
             effects: effects_pipeline(&device, &shader, &render_layout, surface_format),
             render: render_pipeline(&device, &shader, &render_layout, surface_format),
             graph: graph_pipeline(&device, &shader, surface_format),
         };
 
         let boids = [boid_a, boid_b];
+        let field = [field_a, field_b];
         let buffers = Buffers {
             params: params_buffer,
             boids,
+            field,
+            field_deposits,
             grid_counts,
             grid_offsets,
             grid_offsets_write,
@@ -860,6 +961,56 @@ impl State {
             cause_counts_read,
             graph_vertices,
         };
+
+        let clear_field = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("clear_field_bg"),
+            layout: &clear_field_bgl,
+            entries: &[bind_entry(17, &buffers.field_deposits)],
+        });
+        let update_field = [
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("update_field_bg_0"),
+                layout: &update_field_bgl,
+                entries: &[
+                    bind_entry(0, &buffers.params),
+                    bind_entry(3, &buffers.grid_counts),
+                    bind_entry(15, &buffers.field[0]),
+                    bind_entry(16, &buffers.field[1]),
+                    bind_entry(17, &buffers.field_deposits),
+                ],
+            }),
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("update_field_bg_1"),
+                layout: &update_field_bgl,
+                entries: &[
+                    bind_entry(0, &buffers.params),
+                    bind_entry(3, &buffers.grid_counts),
+                    bind_entry(15, &buffers.field[1]),
+                    bind_entry(16, &buffers.field[0]),
+                    bind_entry(17, &buffers.field_deposits),
+                ],
+            }),
+        ];
+        let field = [
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("field_bg_0"),
+                layout: &field_bgl,
+                entries: &[
+                    bind_entry(0, &buffers.params),
+                    bind_entry(3, &buffers.grid_counts),
+                    bind_entry(15, &buffers.field[0]),
+                ],
+            }),
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("field_bg_1"),
+                layout: &field_bgl,
+                entries: &[
+                    bind_entry(0, &buffers.params),
+                    bind_entry(3, &buffers.grid_counts),
+                    bind_entry(15, &buffers.field[1]),
+                ],
+            }),
+        ];
 
         let reset_dead = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("reset_dead_bg"),
@@ -921,6 +1072,7 @@ impl State {
                     bind_entry(0, &buffers.params),
                     bind_entry(1, &buffers.boids[0]),
                     bind_entry(3, &buffers.grid_counts),
+                    bind_entry(17, &buffers.field_deposits),
                 ],
             }),
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -930,6 +1082,7 @@ impl State {
                     bind_entry(0, &buffers.params),
                     bind_entry(1, &buffers.boids[1]),
                     bind_entry(3, &buffers.grid_counts),
+                    bind_entry(17, &buffers.field_deposits),
                 ],
             }),
         ];
@@ -968,6 +1121,7 @@ impl State {
                     bind_entry(6, &buffers.grid_indices),
                     bind_entry(9, &buffers.dead_new),
                     bind_entry(10, &buffers.dead_new_count),
+                    bind_entry(15, &buffers.field[1]),
                 ],
             }),
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -982,6 +1136,7 @@ impl State {
                     bind_entry(6, &buffers.grid_indices),
                     bind_entry(9, &buffers.dead_new),
                     bind_entry(10, &buffers.dead_new_count),
+                    bind_entry(15, &buffers.field[0]),
                 ],
             }),
         ];
@@ -1065,6 +1220,9 @@ impl State {
         ];
 
         let bind_groups = BindGroups {
+            clear_field,
+            update_field,
+            field,
             reset_dead,
             clear_grid,
             scan,
@@ -1357,6 +1515,20 @@ impl State {
                 });
 
             let pixels_per_point = window.scale_factor() as f32;
+            egui::Area::new(egui::Id::new("field_legend"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(12.0, 12.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Resonance");
+                            ui.colored_label(egui::Color32::from_rgb(255, 110, 20), "crest");
+                            ui.colored_label(egui::Color32::from_rgb(20, 150, 255), "trough");
+                            ui.colored_label(egui::Color32::from_rgb(190, 240, 255), "force →");
+                            ui.colored_label(egui::Color32::from_rgb(20, 235, 155), "density");
+                        });
+                    });
+                });
             let graph_height_px = GRAPH_HEIGHT_PX.min(self.size.height.saturating_sub(1));
             let graph_top_ui =
                 self.size.height.saturating_sub(graph_height_px) as f32 / pixels_per_point;
@@ -1510,6 +1682,9 @@ impl State {
             );
             render_pass.set_scissor_rect(0, 0, self.size.width, boid_height);
             let sim_start = Instant::now();
+            render_pass.set_pipeline(&self.pipelines.field);
+            render_pass.set_bind_group(0, &self.bind_groups.field[self.current], &[]);
+            render_pass.draw(0..6, 0..1);
             render_pass.set_pipeline(&self.pipelines.effects);
             render_pass.set_bind_group(0, &self.bind_groups.render[self.current], &[]);
             render_pass.draw(0..6, 0..BOID_CAPACITY);
@@ -1630,9 +1805,20 @@ impl State {
 
     fn run_compute_passes(&self, encoder: &mut wgpu::CommandEncoder) {
         let grid_dispatch = dispatch_count(self.grid_cells, WORKGROUP_SIZE);
+        let field_dispatch = dispatch_count(FIELD_CELL_COUNT, WORKGROUP_SIZE);
         let boid_dispatch = dispatch_count(BOID_CAPACITY, WORKGROUP_SIZE);
         let in_idx = self.current;
         let out_idx = 1 - self.current;
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("clear_resonance_field"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.clear_field);
+            pass.set_bind_group(0, &self.bind_groups.clear_field, &[]);
+            pass.dispatch_workgroups(field_dispatch, 1, 1);
+        }
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1662,6 +1848,16 @@ impl State {
             pass.set_pipeline(&self.pipelines.build_counts);
             pass.set_bind_group(0, &self.bind_groups.build_counts[in_idx], &[]);
             pass.dispatch_workgroups(boid_dispatch, 1, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("update_resonance_field"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.update_field);
+            pass.set_bind_group(0, &self.bind_groups.update_field[in_idx], &[]);
+            pass.dispatch_workgroups(field_dispatch, 1, 1);
         }
 
         {
@@ -1858,6 +2054,9 @@ impl State {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            pass.set_pipeline(&self.pipelines.field);
+            pass.set_bind_group(0, &self.bind_groups.field[self.current], &[]);
+            pass.draw(0..6, 0..1);
             pass.set_pipeline(&self.pipelines.effects);
             pass.set_bind_group(0, &self.bind_groups.render[self.current], &[]);
             pass.draw(0..6, 0..BOID_CAPACITY);
@@ -2218,6 +2417,44 @@ fn effects_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    })
+}
+
+fn field_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("field_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_field",
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_field",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -2798,5 +3035,11 @@ mod tests {
             .map(str::to_string),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resonance_field_meets_minimum_resolution() {
+        assert!(FIELD_GRID_SIZE >= 200);
+        assert_eq!(FIELD_CELL_COUNT, FIELD_GRID_SIZE * FIELD_GRID_SIZE);
     }
 }
