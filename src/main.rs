@@ -47,15 +47,15 @@ const PREDATOR_LIFETIME_MIN: u32 = 500;
 const PREDATOR_LIFETIME_MAX: u32 = 1000;
 
 const GRAPH_STANDARD: usize = 0;
-const GRAPH_PULSE: usize = 1;
+const GRAPH_WEAVER: usize = 1;
 const GRAPH_COURIER: usize = 2;
 const GRAPH_WARDEN: usize = 3;
 const GRAPH_PREDATOR: usize = 4;
 const GRAPH_SERIES: usize = 5;
-const GRAPH_LABELS: [&str; GRAPH_SERIES] = ["Standard", "Pulse", "Courier", "Warden", "Predators"];
+const GRAPH_LABELS: [&str; GRAPH_SERIES] = ["Standard", "Weaver", "Courier", "Warden", "Predators"];
 const GRAPH_COLORS: [[u8; 3]; GRAPH_SERIES] = [
     [45, 110, 255],
-    [255, 184, 13],
+    [45, 235, 255],
     [255, 31, 184],
     [38, 230, 89],
     [255, 68, 68],
@@ -84,12 +84,10 @@ const FLAG_PREDATOR: u32 = 1 << 0;
 const FLAG_ALIVE: u32 = 1 << 1;
 
 const KIND_STANDARD: u32 = 0;
-const KIND_PULSE: u32 = 1;
+const KIND_WEAVER: u32 = 1;
 const KIND_COURIER: u32 = 2;
 const KIND_WARDEN: u32 = 3;
 const PREY_KIND_COUNT: usize = 4;
-const PULSE_STATE_SHIFT: u32 = 16;
-const PULSE_PERIOD: u32 = 240;
 
 const PREDATOR_POPULATION_INDEX: usize = PREY_SPECIES_COUNT;
 const KIND_POPULATION_START: usize = PREDATOR_POPULATION_INDEX + 1;
@@ -205,9 +203,9 @@ struct BindGroups {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct FieldCell {
-    height: f32,
-    velocity: f32,
-    gradient: [f32; 2],
+    flow: [f32; 2],
+    strength: f32,
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -345,7 +343,7 @@ struct HeadlessOptions {
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct InitialMix {
-    pulse_ratio: f32,
+    weaver_ratio: f32,
     courier_ratio: f32,
     warden_ratio: f32,
 }
@@ -353,7 +351,7 @@ struct InitialMix {
 impl Default for InitialMix {
     fn default() -> Self {
         Self {
-            pulse_ratio: 0.01,
+            weaver_ratio: 0.01,
             courier_ratio: 0.002,
             warden_ratio: 0.08,
         }
@@ -530,20 +528,20 @@ impl State {
 
         let field_buffer_size = FIELD_CELL_COUNT as u64 * std::mem::size_of::<FieldCell>() as u64;
         let field_a = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("resonance_field_a"),
+            label: Some("weaver_trail_field_a"),
             size: field_buffer_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let field_b = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("resonance_field_b"),
+            label: Some("weaver_trail_field_b"),
             size: field_buffer_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let field_deposits = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("resonance_field_deposits"),
-            size: FIELD_CELL_COUNT as u64 * 4,
+            label: Some("weaver_trail_deposits"),
+            size: FIELD_CELL_COUNT as u64 * 4 * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -902,13 +900,13 @@ impl State {
                 &device,
                 &shader,
                 &clear_field_layout,
-                "clear_resonance_field",
+                "clear_trail_field",
             ),
             update_field: compute_pipeline(
                 &device,
                 &shader,
                 &update_field_layout,
-                "update_resonance_field",
+                "update_trail_field",
             ),
             clear_grid: compute_pipeline(&device, &shader, &clear_layout, "clear_grid_counts"),
             reset_dead: compute_pipeline(&device, &shader, &reset_layout, "reset_dead_new"),
@@ -1521,11 +1519,19 @@ impl State {
                 .show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("Resonance");
-                            ui.colored_label(egui::Color32::from_rgb(255, 110, 20), "crest");
-                            ui.colored_label(egui::Color32::from_rgb(20, 150, 255), "trough");
-                            ui.colored_label(egui::Color32::from_rgb(190, 240, 255), "force →");
-                            ui.colored_label(egui::Color32::from_rgb(20, 235, 155), "density");
+                            ui.label("Weaver routes");
+                            ui.colored_label(
+                                egui::Color32::from_rgb(45, 235, 255),
+                                "bright = recent",
+                            );
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 240, 255),
+                                "arrows = steering",
+                            );
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 70, 70),
+                                "slash = predator cut",
+                            );
                         });
                     });
                 });
@@ -1758,7 +1764,8 @@ impl State {
                     let mut graph_counts = [0u32; GRAPH_SERIES];
                     graph_counts[GRAPH_STANDARD] =
                         counts[KIND_POPULATION_START + KIND_STANDARD as usize];
-                    graph_counts[GRAPH_PULSE] = counts[KIND_POPULATION_START + KIND_PULSE as usize];
+                    graph_counts[GRAPH_WEAVER] =
+                        counts[KIND_POPULATION_START + KIND_WEAVER as usize];
                     graph_counts[GRAPH_COURIER] =
                         counts[KIND_POPULATION_START + KIND_COURIER as usize];
                     graph_counts[GRAPH_WARDEN] =
@@ -1812,7 +1819,7 @@ impl State {
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("clear_resonance_field"),
+                label: Some("clear_trail_field"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipelines.clear_field);
@@ -1852,7 +1859,7 @@ impl State {
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("update_resonance_field"),
+                label: Some("update_trail_field"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipelines.update_field);
@@ -2568,22 +2575,17 @@ fn create_initial_boids(initial_count: u32, seed: u64, mix: InitialMix) -> Vec<B
             KIND_STANDARD
         } else {
             let roll = rng.gen_range(0.0..1.0);
-            if roll < mix.pulse_ratio {
-                KIND_PULSE
-            } else if roll < mix.pulse_ratio + mix.courier_ratio {
+            if roll < mix.weaver_ratio {
+                KIND_WEAVER
+            } else if roll < mix.weaver_ratio + mix.courier_ratio {
                 KIND_COURIER
-            } else if roll < mix.pulse_ratio + mix.courier_ratio + mix.warden_ratio {
+            } else if roll < mix.weaver_ratio + mix.courier_ratio + mix.warden_ratio {
                 KIND_WARDEN
             } else {
                 KIND_STANDARD
             }
         };
         let flags = FLAG_ALIVE | if predator { FLAG_PREDATOR } else { 0 };
-        let pulse_state = if kind == KIND_PULSE {
-            ((i.wrapping_mul(73) ^ seed as u32) % PULSE_PERIOD) << PULSE_STATE_SHIFT
-        } else {
-            0
-        };
         let life = START_LIFE;
         let lifetime = if predator {
             rng.gen_range(PREDATOR_LIFETIME_MIN..=PREDATOR_LIFETIME_MAX)
@@ -2603,7 +2605,7 @@ fn create_initial_boids(initial_count: u32, seed: u64, mix: InitialMix) -> Vec<B
             lifetime,
             species,
             flags,
-            _pad: pulse_state,
+            _pad: 0,
             kind,
         });
     }
@@ -2674,8 +2676,8 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode, Str
                     .parse()
                     .map_err(|_| format!("invalid initial count: {value}"))?;
             }
-            "--pulse-ratio" => {
-                options.mix.pulse_ratio = parse_ratio("pulse", value)?;
+            "--weaver-ratio" => {
+                options.mix.weaver_ratio = parse_ratio("weaver", value)?;
             }
             "--courier-ratio" => {
                 options.mix.courier_ratio = parse_ratio("courier", value)?;
@@ -2720,10 +2722,10 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode, Str
         return Err("render dimensions must be greater than zero".to_string());
     }
     let special_ratio =
-        options.mix.pulse_ratio + options.mix.courier_ratio + options.mix.warden_ratio;
+        options.mix.weaver_ratio + options.mix.courier_ratio + options.mix.warden_ratio;
     if special_ratio > 1.0 {
         return Err(format!(
-            "pulse, courier, and warden ratios must total at most 1.0 (got {special_ratio})"
+            "weaver, courier, and warden ratios must total at most 1.0 (got {special_ratio})"
         ));
     }
     Ok(RunMode::Headless(options))
@@ -2750,7 +2752,7 @@ fn print_usage() {
            --sample-every N    Emit population every N frames (default: 100)\n\
            --seed N            Initial population seed (default: 1)\n\
            --initial-count N   Initial boids, max {BOID_CAPACITY} (default: {INITIAL_COUNT})\n\
-           --pulse-ratio R     Initial fraction of prey that pulse (default: 0.01)\n\
+           --weaver-ratio R    Initial fraction of prey that weave routes (default: 0.01)\n\
            --courier-ratio R   Initial fraction of prey that carry panic (default: 0.002)\n\
            --warden-ratio R    Initial fraction of prey that defend (default: 0.08)\n\
            --format FORMAT     csv or jsonl (default: csv)\n\
@@ -2774,14 +2776,14 @@ fn emit_population(format: HeadlessFormat, frame: u64, counts: &[u32; POPULATION
             counts[4],
             counts[PREDATOR_POPULATION_INDEX],
             counts[KIND_POPULATION_START + KIND_STANDARD as usize],
-            counts[KIND_POPULATION_START + KIND_PULSE as usize],
+            counts[KIND_POPULATION_START + KIND_WEAVER as usize],
             counts[KIND_POPULATION_START + KIND_COURIER as usize],
             counts[KIND_POPULATION_START + KIND_WARDEN as usize],
             counts[PANICKED_POPULATION_INDEX],
             counts[CHARGING_WARDEN_POPULATION_INDEX]
         ),
         HeadlessFormat::Jsonl => println!(
-            "{{\"frame\":{frame},\"populations\":{{\"prey_0\":{},\"prey_1\":{},\"prey_2\":{},\"prey_3\":{},\"prey_4\":{},\"predators\":{},\"standard\":{},\"pulse\":{},\"courier\":{},\"warden\":{}}},\"activity\":{{\"panicked\":{},\"charging_wardens\":{}}},\"total\":{total}}}",
+            "{{\"frame\":{frame},\"populations\":{{\"prey_0\":{},\"prey_1\":{},\"prey_2\":{},\"prey_3\":{},\"prey_4\":{},\"predators\":{},\"standard\":{},\"weaver\":{},\"courier\":{},\"warden\":{}}},\"activity\":{{\"panicked\":{},\"charging_wardens\":{}}},\"total\":{total}}}",
             counts[0],
             counts[1],
             counts[2],
@@ -2789,7 +2791,7 @@ fn emit_population(format: HeadlessFormat, frame: u64, counts: &[u32; POPULATION
             counts[4],
             counts[PREDATOR_POPULATION_INDEX],
             counts[KIND_POPULATION_START + KIND_STANDARD as usize],
-            counts[KIND_POPULATION_START + KIND_PULSE as usize],
+            counts[KIND_POPULATION_START + KIND_WEAVER as usize],
             counts[KIND_POPULATION_START + KIND_COURIER as usize],
             counts[KIND_POPULATION_START + KIND_WARDEN as usize],
             counts[PANICKED_POPULATION_INDEX],
@@ -2803,19 +2805,19 @@ async fn run_headless(options: HeadlessOptions) -> Result<(), String> {
     let mut state = State::new(None, options.initial_count, options.seed, options.mix).await;
     let initialization_elapsed = started.elapsed();
     eprintln!(
-        "Headless run: frames={}, sample_every={}, seed={}, initial_count={}, pulse_ratio={}, courier_ratio={}, warden_ratio={}, format={:?}",
+        "Headless run: frames={}, sample_every={}, seed={}, initial_count={}, weaver_ratio={}, courier_ratio={}, warden_ratio={}, format={:?}",
         options.frames,
         options.sample_every,
         options.seed,
         options.initial_count,
-        options.mix.pulse_ratio,
+        options.mix.weaver_ratio,
         options.mix.courier_ratio,
         options.mix.warden_ratio,
         options.format
     );
     if options.format == HeadlessFormat::Csv {
         println!(
-            "frame,prey_0,prey_1,prey_2,prey_3,prey_4,predators,standard,pulse,courier,warden,panicked,charging_wardens,total"
+            "frame,prey_0,prey_1,prey_2,prey_3,prey_4,predators,standard,weaver,courier,warden,panicked,charging_wardens,total"
         );
     }
 
@@ -2958,7 +2960,7 @@ mod tests {
                 "42",
                 "--initial-count",
                 "1000",
-                "--pulse-ratio",
+                "--weaver-ratio",
                 "0.03",
                 "--courier-ratio",
                 "0.004",
@@ -2987,7 +2989,7 @@ mod tests {
                 seed: 42,
                 initial_count: 1000,
                 mix: InitialMix {
-                    pulse_ratio: 0.03,
+                    weaver_ratio: 0.03,
                     courier_ratio: 0.004,
                     warden_ratio: 0.12,
                 },
@@ -3010,7 +3012,7 @@ mod tests {
         let result = parse_run_mode(
             [
                 "--headless",
-                "--pulse-ratio",
+                "--weaver-ratio",
                 "0.4",
                 "--courier-ratio",
                 "0.3",
@@ -3038,7 +3040,7 @@ mod tests {
     }
 
     #[test]
-    fn resonance_field_meets_minimum_resolution() {
+    fn trail_field_meets_minimum_resolution() {
         assert!(FIELD_GRID_SIZE >= 200);
         assert_eq!(FIELD_CELL_COUNT, FIELD_GRID_SIZE * FIELD_GRID_SIZE);
     }

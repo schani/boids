@@ -3,7 +3,7 @@ const FLAG_ALIVE: u32 = 2u;
 const FLAG_WARDEN_CHARGING: u32 = 4u;
 
 const KIND_STANDARD: u32 = 0u;
-const KIND_PULSE: u32 = 1u;
+const KIND_WEAVER: u32 = 1u;
 const KIND_COURIER: u32 = 2u;
 const KIND_WARDEN: u32 = 3u;
 const PREY_KIND_COUNT: u32 = 4u;
@@ -12,10 +12,6 @@ const PANIC_SHIFT: u32 = 8u;
 const PANIC_MASK: u32 = 0x0000ff00u;
 const PANIC_MAX: u32 = 12u;
 const DEPLETION_REASON_MASK: u32 = 0x000000ffu;
-const PULSE_STATE_SHIFT: u32 = 16u;
-const PULSE_STATE_MASK: u32 = 0x00ff0000u;
-
-const PULSE_PERIOD: u32 = 240u;
 const WARDEN_CHARGE_FORCE: f32 = 2.2;
 const WARDEN_REPEL_FORCE: f32 = 45.0;
 const WARDEN_CHARGE_LIFE_COST: f32 = 2.0;
@@ -26,7 +22,7 @@ const KIND_SHIFT_DENOM: u32 = 2048u;
 const FIELD_GRID_SIZE: u32 = 200u;
 const FIELD_CELL_COUNT: u32 = FIELD_GRID_SIZE * FIELD_GRID_SIZE;
 const FIELD_DEPOSIT_SCALE: f32 = 1024.0;
-const FIELD_FORCE: f32 = 0.16;
+const TRAIL_FOLLOW_FORCE: f32 = 0.42;
 
 const WORKGROUP_SIZE: u32 = 256u;
 const CAUSE_REPRODUCTION_SPLIT: u32 = 0u;
@@ -94,9 +90,9 @@ struct Params {
 };
 
 struct FieldCell {
-  height: f32,
-  velocity: f32,
-  gradient: vec2<f32>,
+  flow: vec2<f32>,
+  strength: f32,
+  _pad: f32,
 };
 
 @group(0) @binding(0) var<storage, read> params: Params;
@@ -142,8 +138,8 @@ fn field_index_for_pos(pos: vec2<f32>) -> u32 {
   return field_index(cell.x, cell.y);
 }
 
-fn resonance_gradient(pos: vec2<f32>) -> vec2<f32> {
-  return field_state[field_index_for_pos(pos)].gradient;
+fn trail_at(pos: vec2<f32>) -> FieldCell {
+  return field_state[field_index_for_pos(pos)];
 }
 
 fn hash_u32(x: u32) -> u32 {
@@ -165,10 +161,6 @@ fn random_lifetime(seed: u32, predator: bool) -> u32 {
 
 fn panic_level(packed: u32) -> u32 {
   return (packed & PANIC_MASK) >> PANIC_SHIFT;
-}
-
-fn pulse_tick(packed: u32) -> u32 {
-  return (packed & PULSE_STATE_MASK) >> PULSE_STATE_SHIFT;
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -208,13 +200,16 @@ fn build_grid_counts(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cell = cx + cy * params.grid_size.x;
   atomicAdd(&grid_counts[cell], 1u);
   let predator = (b.flags & FLAG_PREDATOR) != 0u;
-  if (!predator && (b.kind % PREY_KIND_COUNT) == KIND_PULSE) {
-    let phase = f32(pulse_tick(b._pad)) / f32(PULSE_PERIOD);
-    let wave = sin(phase * 6.28318530718);
-    atomicAdd(
-      &field_deposits[field_index_for_pos(b.pos)],
-      i32(wave * FIELD_DEPOSIT_SCALE)
-    );
+  let field_cell = field_index_for_pos(b.pos) * 4u;
+  if (!predator && (b.kind % PREY_KIND_COUNT) == KIND_WEAVER) {
+    let heading = normalize_or_zero(b.vel);
+    atomicAdd(&field_deposits[field_cell], i32(heading.x * FIELD_DEPOSIT_SCALE));
+    atomicAdd(&field_deposits[field_cell + 1u], i32(heading.y * FIELD_DEPOSIT_SCALE));
+    atomicAdd(&field_deposits[field_cell + 2u], i32(FIELD_DEPOSIT_SCALE));
+  } else if (predator) {
+    // Predators punch temporary holes in routes. A flock visibly streams around
+    // those breaks instead of blindly following a stale trail into danger.
+    atomicAdd(&field_deposits[field_cell + 3u], i32(FIELD_DEPOSIT_SCALE));
   }
 }
 
@@ -253,43 +248,54 @@ fn scatter_indices(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
-fn clear_resonance_field(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn clear_trail_field(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x;
   if (idx >= FIELD_CELL_COUNT) { return; }
-  atomicStore(&field_deposits[idx], 0i);
+  let deposit = idx * 4u;
+  atomicStore(&field_deposits[deposit], 0i);
+  atomicStore(&field_deposits[deposit + 1u], 0i);
+  atomicStore(&field_deposits[deposit + 2u], 0i);
+  atomicStore(&field_deposits[deposit + 3u], 0i);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
-fn update_resonance_field(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn update_trail_field(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x;
   if (idx >= FIELD_CELL_COUNT) { return; }
   let x = idx % FIELD_GRID_SIZE;
   let y = idx / FIELD_GRID_SIZE;
   let center = field_state[idx];
-  let left = field_state[field_index(x - min(x, 1u), y)].height;
-  let right = field_state[field_index(min(x + 1u, FIELD_GRID_SIZE - 1u), y)].height;
-  let up = field_state[field_index(x, y - min(y, 1u))].height;
-  let down = field_state[field_index(x, min(y + 1u, FIELD_GRID_SIZE - 1u))].height;
-  let laplacian = left + right + up + down - 4.0 * center.height;
+  let left = field_state[field_index(x - min(x, 1u), y)].flow;
+  let right = field_state[field_index(min(x + 1u, FIELD_GRID_SIZE - 1u), y)].flow;
+  let up = field_state[field_index(x, y - min(y, 1u))].flow;
+  let down = field_state[field_index(x, min(y + 1u, FIELD_GRID_SIZE - 1u))].flow;
+  let neighbor_flow = (left + right + up + down) * 0.25;
 
-  let boid_x = min(x * params.grid_size.x / FIELD_GRID_SIZE, params.grid_size.x - 1u);
-  let boid_y = min(y * params.grid_size.y / FIELD_GRID_SIZE, params.grid_size.y - 1u);
-  let density = f32(atomicLoad(&grid_counts[boid_x + boid_y * params.grid_size.x]));
-  let stiffness = 0.19 / (1.0 + density * 0.028);
-  let damping = clamp(0.986 - density * 0.0003, 0.96, 0.986);
-  let drive = clamp(
-    f32(atomicLoad(&field_deposits[idx])) / FIELD_DEPOSIT_SCALE * 0.04,
-    -0.18,
-    0.18
+  let deposit = idx * 4u;
+  let deposited_flow = vec2(
+    f32(atomicLoad(&field_deposits[deposit])),
+    f32(atomicLoad(&field_deposits[deposit + 1u]))
+  ) / FIELD_DEPOSIT_SCALE;
+  let weaver_presence = clamp(
+    f32(atomicLoad(&field_deposits[deposit + 2u])) / FIELD_DEPOSIT_SCALE,
+    0.0,
+    4.0
   );
-  let velocity = clamp(
-    (center.velocity + laplacian * stiffness + drive) * damping,
-    -2.5,
-    2.5
+  let predator_break = clamp(
+    f32(atomicLoad(&field_deposits[deposit + 3u])) / FIELD_DEPOSIT_SCALE,
+    0.0,
+    3.0
   );
-  let height = clamp((center.height + velocity) * 0.995, -6.0, 6.0);
-  let gradient = vec2(right - left, down - up) * 0.5;
-  field_out[idx] = FieldCell(height, velocity, gradient);
+
+  // Directional wakes diffuse just enough to connect consecutive positions,
+  // then fade quickly enough that every visible route is recent boid history.
+  var flow = mix(center.flow, neighbor_flow, 0.075) * 0.975;
+  flow = flow + deposited_flow * (0.32 + weaver_presence * 0.06);
+  let route_before_break = length(flow);
+  flow = flow * (1.0 - 0.58 * min(predator_break, 1.0));
+  let strength = min(length(flow), 4.0);
+  let visible_break = predator_break * smoothstep(0.04, 0.22, route_before_break);
+  field_out[idx] = FieldCell(flow, strength, visible_break);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -319,8 +325,14 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   var next_vel = b.vel;
   let vlen = length(b.vel);
   next_vel = next_vel + normalize_or_zero(b.vel) * (target_velocity - vlen) * 0.2;
-  let field_response = select(1.0, 0.55, predator);
-  next_vel = next_vel - resonance_gradient(b.pos) * FIELD_FORCE * field_response;
+  let trail = trail_at(b.pos);
+  if (!predator && trail.strength > 0.04) {
+    let follow = normalize_or_zero(trail.flow);
+    let alignment = max(0.2, dot(normalize_or_zero(b.vel), follow));
+    let kind_response = select(1.0, 0.45, kind == KIND_WEAVER);
+    next_vel = next_vel + follow * min(trail.strength, 1.5)
+      * TRAIL_FOLLOW_FORCE * alignment * kind_response;
+  }
 
   var align_steer = vec2(0.0, 0.0);
   var cohesion_steer = vec2(0.0, 0.0);
@@ -543,13 +555,8 @@ fn update_boids(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let next_pos = b.pos + next_vel;
-  var next_pulse_tick = 0u;
-  if (!predator && kind == KIND_PULSE) {
-    next_pulse_tick = (pulse_tick(b._pad) + 1u) % PULSE_PERIOD;
-  }
   let packed_state = last_depletion_reason
-    | (next_panic << PANIC_SHIFT)
-    | (next_pulse_tick << PULSE_STATE_SHIFT);
+    | (next_panic << PANIC_SHIFT);
   let out_pad = select(0u, packed_state, alive_out);
   boid_out[idx] = Boid(next_pos, next_vel, next_life, next_lifetime, b.species, out_flags, out_pad, kind);
 }
@@ -743,6 +750,9 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   } else if (kind == KIND_WARDEN) {
     local.x = select(-8.0, 19.0, vid == 0u);
     local.y = select(select(-12.0, 12.0, vid == 1u), 0.0, vid == 0u);
+  } else if (kind == KIND_WEAVER) {
+    local.x = select(-14.0, 24.0, vid == 0u);
+    local.y = select(select(-7.0, 7.0, vid == 1u), 0.0, vid == 0u);
   }
 
   let v = b.vel;
@@ -753,10 +763,6 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 
   let life_for_size = select(b.life, min(b.life, params.start_life), predator);
   var scale = 0.5 + 0.5 * (life_for_size / 600.0);
-  if (kind == KIND_PULSE) {
-    let pulse_position = f32(pulse_tick(b._pad)) / f32(PULSE_PERIOD);
-    scale = scale * (1.0 + 0.32 * sin(pulse_position * 6.28318530718));
-  }
   if (predator) {
     scale = scale * 2.0;
   }
@@ -782,8 +788,8 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   } else if (s == 4u) {
     color = vec3(0.478, 0.475, 1.0);
   }
-  if (kind == KIND_PULSE) {
-    color = vec3(1.0, 0.72, 0.05);
+  if (kind == KIND_WEAVER) {
+    color = vec3(0.08, 0.92, 1.0);
   } else if (kind == KIND_COURIER) {
     color = vec3(1.0, 0.12, 0.72);
   } else if (kind == KIND_WARDEN) {
@@ -839,10 +845,6 @@ fn vs_effect(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32)
     effect = 2u;
     extent = 180.0;
     phase = f32(b.lifetime % 72u) / 72.0;
-  } else if (kind == KIND_PULSE && (hash_u32(iid ^ 0x517cc1b7u) % 8u) == 0u) {
-    effect = 1u;
-    extent = 50.0;
-    phase = f32(pulse_tick(b._pad)) / f32(PULSE_PERIOD);
   } else if (panic > 0u && (hash_u32(iid ^ 0x9e3779b9u) % 128u) == 0u) {
     effect = 3u;
     extent = 95.0;
@@ -872,18 +874,6 @@ fn vs_effect(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32)
 fn fs_effect(in: EffectOut) -> @location(0) vec4<f32> {
   let dist = length(in.local);
   if (dist > 1.0 || in.effect == 0u) { discard; }
-
-  if (in.effect == 1u) {
-    let wave = sin(in.phase * 6.28318530718);
-    let charge = 0.55 + abs(wave) * 0.45;
-    let core = 1.0 - smoothstep(0.02, 0.24, dist);
-    let horizontal = (1.0 - smoothstep(0.025, 0.11, abs(in.local.y)))
-      * (1.0 - smoothstep(0.15, 1.0, abs(in.local.x)));
-    let vertical = (1.0 - smoothstep(0.025, 0.11, abs(in.local.x)))
-      * (1.0 - smoothstep(0.15, 1.0, abs(in.local.y)));
-    let flare = max(horizontal, vertical) * charge;
-    return vec4(1.0, 0.55 + wave * 0.16, 0.02, core * 0.9 + flare * 0.48);
-  }
 
   if (in.effect == 2u) {
     let ring_radius = 0.18 + (1.0 - in.phase) * 0.72;
@@ -917,7 +907,7 @@ fn vs_field(@builtin(vertex_index) vid: u32) -> FieldOut {
   return FieldOut(vec4(pos, 0.0, 1.0), uv);
 }
 
-fn sample_resonance_field(uv: vec2<f32>) -> FieldCell {
+fn sample_trail_field(uv: vec2<f32>) -> FieldCell {
   let grid_pos = clamp(uv, vec2(0.0), vec2(1.0)) * f32(FIELD_GRID_SIZE - 1u);
   let x0 = u32(floor(grid_pos.x));
   let y0 = u32(floor(grid_pos.y));
@@ -928,61 +918,46 @@ fn sample_resonance_field(uv: vec2<f32>) -> FieldCell {
   let b = field_state[field_index(x1, y0)];
   let c = field_state[field_index(x0, y1)];
   let d = field_state[field_index(x1, y1)];
-  let top = vec2(mix(a.height, b.height, blend.x), mix(a.velocity, b.velocity, blend.x));
-  let bottom = vec2(mix(c.height, d.height, blend.x), mix(c.velocity, d.velocity, blend.x));
-  let value = mix(top, bottom, blend.y);
-  let top_gradient = mix(a.gradient, b.gradient, blend.x);
-  let bottom_gradient = mix(c.gradient, d.gradient, blend.x);
-  return FieldCell(value.x, value.y, mix(top_gradient, bottom_gradient, blend.y));
-}
-
-fn sample_boid_density(uv: vec2<f32>) -> f32 {
-  let normalized = clamp(uv, vec2(0.0), vec2(0.999999));
-  let cell = vec2<u32>(normalized * vec2<f32>(params.grid_size));
-  return f32(atomicLoad(&grid_counts[cell.x + cell.y * params.grid_size.x]));
+  let top_flow = mix(a.flow, b.flow, blend.x);
+  let bottom_flow = mix(c.flow, d.flow, blend.x);
+  let strength = mix(mix(a.strength, b.strength, blend.x), mix(c.strength, d.strength, blend.x), blend.y);
+  let disruption = mix(mix(a._pad, b._pad, blend.x), mix(c._pad, d._pad, blend.x), blend.y);
+  return FieldCell(mix(top_flow, bottom_flow, blend.y), strength, disruption);
 }
 
 @fragment
 fn fs_field(in: FieldOut) -> @location(0) vec4<f32> {
-  let field = sample_resonance_field(in.uv);
-  let density = sample_boid_density(in.uv);
-  let energy = 1.0 - exp(-abs(field.height) * 0.58);
-  let motion = 1.0 - exp(-abs(field.velocity) * 1.7);
-  let base = vec3(0.012, 0.018, 0.055);
-  let crest = vec3(1.0, 0.39, 0.025);
-  let trough = vec3(0.015, 0.46, 1.0);
-  let polarity_color = select(trough, crest, field.height >= 0.0);
-  var color = mix(base, polarity_color, energy * 0.64);
-
-  let band_phase = fract(abs(field.height) * 0.72);
-  let contour = pow(max(0.0, 1.0 - abs(band_phase - 0.5) * 2.0), 14.0) * energy;
-  color = color + vec3(1.0, 0.78, 0.24) * contour * 0.48;
-  color = color + vec3(0.34, 0.08, 0.75) * motion * 0.12;
-
-  let density_strength = smoothstep(3.0, 14.0, density);
-  let density_cell = fract(in.uv * vec2<f32>(params.grid_size));
-  let density_edge = 1.0 - smoothstep(0.035, 0.11, min(
-    min(density_cell.x, 1.0 - density_cell.x),
-    min(density_cell.y, 1.0 - density_cell.y)
-  ));
-  color = color + vec3(0.05, 0.92, 0.62) * density_strength
-    * (0.035 + density_edge * 0.055);
-
-  let gradient_strength = length(field.gradient);
-  let force_dir = normalize_or_zero(-field.gradient);
+  let field = sample_trail_field(in.uv);
+  let trail_strength = 1.0 - exp(-field.strength * 1.15);
+  let force_dir = normalize_or_zero(field.flow);
   let force_perp = vec2(-force_dir.y, force_dir.x);
-  let arrow_cell = fract(in.uv * vec2(48.0, 30.0)) - vec2(0.5);
+  let base = vec3(0.008, 0.013, 0.035);
+  let direction_color = mix(
+    vec3(0.18, 0.32, 1.0),
+    vec3(0.05, 0.95, 1.0),
+    force_dir.x * 0.5 + 0.5
+  );
+  var color = mix(base, direction_color, trail_strength * 0.34);
+
+  // Moving dashes read as lanes even in a still frame: their long axis is the
+  // exact direction that prey sample from this cell.
+  let arrow_cell = fract(in.uv * vec2(64.0, 40.0)) - vec2(0.5);
   let along = dot(arrow_cell, force_dir);
   let across = abs(dot(arrow_cell, force_perp));
-  let shaft = (1.0 - smoothstep(0.025, 0.065, across))
-    * smoothstep(-0.34, -0.22, along)
-    * (1.0 - smoothstep(0.18, 0.30, along));
-  let head_width = max(0.0, 0.28 - along) * 0.72;
-  let head = (1.0 - smoothstep(0.025, 0.075, abs(across - head_width)))
-    * smoothstep(0.08, 0.18, along)
-    * (1.0 - smoothstep(0.28, 0.38, along));
-  let arrow = max(shaft, head) * smoothstep(0.035, 0.32, gradient_strength);
-  color = color + vec3(0.72, 0.94, 1.0) * arrow * 0.46;
+  let shaft = (1.0 - smoothstep(0.018, 0.052, across))
+    * smoothstep(-0.38, -0.28, along)
+    * (1.0 - smoothstep(0.18, 0.32, along));
+  let head = (1.0 - smoothstep(0.025, 0.07, abs(across - (0.29 - along) * 0.62)))
+    * smoothstep(0.10, 0.19, along)
+    * (1.0 - smoothstep(0.25, 0.34, along));
+  let route_mark = max(shaft, head) * smoothstep(0.05, 0.28, field.strength);
+  color = color + vec3(0.58, 0.96, 1.0) * route_mark * 0.7;
+
+  // Predator-cleared cells flash red at the actual break point, never as an
+  // unrelated global overlay.
+  let break_grid = fract(in.uv * vec2<f32>(FIELD_GRID_SIZE));
+  let slash = 1.0 - smoothstep(0.035, 0.12, abs(break_grid.x + break_grid.y - 1.0));
+  color = mix(color, vec3(1.0, 0.035, 0.08), slash * smoothstep(0.1, 0.8, field._pad) * 0.72);
   return vec4(color, 1.0);
 }
 

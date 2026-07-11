@@ -46,24 +46,25 @@ cargo run --release -- --headless --frames 1200 --seed 42 \
 Changing `--frames` provides repeatable checkpoint requests for visual comparisons. Rendering
 happens only after simulation completes, so it does not distort headless throughput measurements.
 
-Headless output also includes each behavioral kind (`standard`, `pulse`, `courier`, and `warden`)
+Headless output also includes each behavioral kind (`standard`, `weaver`, `courier`, and `warden`)
 plus the instantaneous numbers of panicked prey and charging wardens. Initial mixes can be isolated
-or combined with `--pulse-ratio`, `--courier-ratio`, and `--warden-ratio`. For example, this runs a
+or combined with `--weaver-ratio`, `--courier-ratio`, and `--warden-ratio`. For example, this runs a
 Courier-only experiment with 0.2% of prey acting as Couriers:
 
 ```bash
 cargo run --release -- --headless --frames 5000 --sample-every 100 \
-  --pulse-ratio 0 --courier-ratio 0.002 --warden-ratio 0
+  --weaver-ratio 0 --courier-ratio 0.002 --warden-ratio 0
 ```
 
 ### Emergent prey kinds
 
 Three uncommon prey kinds add large-scale motion and distinct ecological roles:
 
-- **Pulse** (gold, breathing triangles) injects alternating positive and negative energy into a
-  persistent 200×200 resonance field. Waves propagate, interfere, and push every boid along their
-  gradient. Boid density slows and damps waves, so flocks reshape the same field that moves them.
-  Offspring inherit phase, creating local groups of synchronized emitters.
+- **Weaver** (electric-cyan, long-tailed triangles) writes its current heading into a persistent
+  200×200 route field. Recent paths connect into glowing, directional lanes that nearby prey can
+  follow. Routes braid where Weavers cross, curl into loops when leaders turn, and reorganize when
+  predators erase gaps in them. The route marks point in the exact direction used by the flocking
+  force, so the visual is a causal map rather than ambient decoration.
 - **Panic Courier** (long magenta triangles) emits a short-lived panic signal after spotting a
   predator. Signal strength falls by one at each hop. Bright double-ring Courier beacons, sparse
   relay ripples, and a strength-weighted magenta tint make alarm fronts visible as they travel
@@ -73,37 +74,34 @@ Three uncommon prey kinds add large-scale motion and distinct ecological roles:
   Charging drains life, so Wardens surge during predator waves but cannot turn that temporary
   advantage into permanent dominance.
 
-The default initial prey mix is 1% Pulse, 0.2% Courier, and 8% Warden. Offspring inherit their
+The default initial prey mix is 1% Weaver, 0.2% Courier, and 8% Warden. Offspring inherit their
 parent’s kind, with a rare behavioral mutation that can restore a locally extinct kind. Dense
 single-kind neighborhoods lose fitness while locally rare kinds get a smaller recovery bonus,
 creating negative frequency dependence and moving population shares. Prey that mutate into
 predators become standard predators.
 
-The native population graph tracks Standard, Pulse, Courier, Warden, and Predator populations
+The native population graph tracks Standard, Weaver, Courier, Warden, and Predator populations
 as separate color-coded lines. Its legend is always visible, and hovering shows every count at
 the selected point in time.
 
-#### Resonance field
+#### Weaver route field
 
-Two GPU buffers hold wave height, velocity, and a precomputed force gradient for each of 40,000
-field cells. Pulse deposits are folded into the existing spatial-grid build, which also supplies
-boid density to the wave solver without another per-boid pass. One pass clears deposits and one
-updates the damped wave equation each frame. The renderer displays positive crests in gold,
-negative troughs in cyan, and high-energy interference contours in white-gold beneath the boids.
-Sparse gold starbursts identify Pulse emitters, pale arrows show the force direction applied to
-boids, and a subtle green tactical-grid imprint marks current high-density flock cells that slow
-and damp propagation. With no Pulses the wave colors and force arrows remain absent; only the
-density imprint remains. The interactive and headless PNG renderers use the same field state and
+Two GPU buffers hold a recent flow vector and strength for each of 40,000 field cells. Weaver
+heading deposits are folded into the existing spatial-grid build, as are predator disruptions,
+so there is no extra per-boid pass. One pass clears deposits and one diffuses and fades routes each
+frame. The renderer draws cyan-violet lanes with arrowheads aligned to the actual force sampled by
+prey. Predator-cleared cells flash with a red slash exactly where a route is broken. With no
+Weavers, no routes appear. The interactive and headless PNG renderers use the same field state and
 shader.
 
 #### Measured cost and population behavior
 
-An optimized 50,000-frame seed-42 stability run on an Apple M2 Max used 20,000 initial boids and
-sampled every 2,500 frames. All four behavioral kinds survived every sample, leadership continued
-to change, and predator/prey oscillations remained active at frame 50,000. The run averaged 729.8
-frames/s versus 818.1 frames/s for the previous fieldless implementation, a 10.8% reduction. The
-field adds no separate boid-deposit pass; its remaining cost is two 40,000-cell passes and one
-precomputed-gradient read per boid. Rendering the final 1600×1000 field PNG took 16.3 ms.
+The route field adds no separate boid-deposit pass; its remaining cost is two 40,000-cell passes
+and one field read per boid. In a 50,000-frame seed-42 run with 20,000 initial boids, every kind
+survived every 2,500-frame sample. The total population continued cycling between roughly 10,600
+and 32,800; the final behavioral populations were 3,861 Standard, 4,513 Weaver, 4,009 Courier,
+5,244 Warden, and 699 predators. The run averaged 525.8 frames/s on an Apple M2 Max and rendered
+the final 1600×1000 PNG in 14.2 ms.
 
 ## Overview
 
