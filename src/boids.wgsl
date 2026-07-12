@@ -930,7 +930,6 @@ fn fs_field(in: FieldOut) -> @location(0) vec4<f32> {
   let field = sample_trail_field(in.uv);
   let trail_strength = 1.0 - exp(-field.strength * 1.15);
   let force_dir = normalize_or_zero(field.flow);
-  let force_perp = vec2(-force_dir.y, force_dir.x);
   let base = vec3(0.008, 0.013, 0.035);
   let direction_color = mix(
     vec3(0.18, 0.32, 1.0),
@@ -938,20 +937,6 @@ fn fs_field(in: FieldOut) -> @location(0) vec4<f32> {
     force_dir.x * 0.5 + 0.5
   );
   var color = mix(base, direction_color, trail_strength * 0.34);
-
-  // Moving dashes read as lanes even in a still frame: their long axis is the
-  // exact direction that prey sample from this cell.
-  let arrow_cell = fract(in.uv * vec2(64.0, 40.0)) - vec2(0.5);
-  let along = dot(arrow_cell, force_dir);
-  let across = abs(dot(arrow_cell, force_perp));
-  let shaft = (1.0 - smoothstep(0.018, 0.052, across))
-    * smoothstep(-0.38, -0.28, along)
-    * (1.0 - smoothstep(0.18, 0.32, along));
-  let head = (1.0 - smoothstep(0.025, 0.07, abs(across - (0.29 - along) * 0.62)))
-    * smoothstep(0.10, 0.19, along)
-    * (1.0 - smoothstep(0.25, 0.34, along));
-  let route_mark = max(shaft, head) * smoothstep(0.05, 0.28, field.strength);
-  color = color + vec3(0.58, 0.96, 1.0) * route_mark * 0.7;
 
   // Predator-cleared cells flash red at the actual break point, never as an
   // unrelated global overlay.

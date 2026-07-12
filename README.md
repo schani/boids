@@ -89,10 +89,10 @@ the selected point in time.
 Two GPU buffers hold a recent flow vector and strength for each of 40,000 field cells. Weaver
 heading deposits are folded into the existing spatial-grid build, as are predator disruptions,
 so there is no extra per-boid pass. One pass clears deposits and one diffuses and fades routes each
-frame. The renderer draws cyan-violet lanes with arrowheads aligned to the actual force sampled by
-prey. Predator-cleared cells flash with a red slash exactly where a route is broken. With no
-Weavers, no routes appear. The interactive and headless PNG renderers use the same field state and
-shader.
+frame. The renderer draws the resulting routes as soft cyan-violet lanes, without direction
+glyphs or other markers over the flock. Predator-cleared cells flash with a red slash exactly
+where a route is broken. With no Weavers, no routes appear. The interactive and headless PNG
+renderers use the same field state and shader.
 
 #### Measured cost and population behavior
 

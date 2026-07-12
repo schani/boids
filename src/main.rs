@@ -1526,7 +1526,7 @@ impl State {
                             );
                             ui.colored_label(
                                 egui::Color32::from_rgb(190, 240, 255),
-                                "arrows = steering",
+                                "glow = active route",
                             );
                             ui.colored_label(
                                 egui::Color32::from_rgb(255, 70, 70),
