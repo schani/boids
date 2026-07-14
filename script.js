@@ -37,13 +37,9 @@ function boidsMain() {
     const mod = i % colorArray.length;
     const predator = i % 200 === 0 && includePredators;
     const color = predator ? predatorColor : colorArray[mod];
-    const targetVelocity = predator
-      ? MAX_VELOCITY * predatorSpeedBonus
-      : MAX_VELOCITY; //* (mod + 1) /  colorArray.length;
+    const targetVelocity = predator ? MAX_VELOCITY * predatorSpeedBonus : MAX_VELOCITY; //* (mod + 1) /  colorArray.length;
 
-    boids.push(
-      new Boid(width * scale, height * scale, color, targetVelocity, predator)
-    );
+    boids.push(new Boid(width * scale, height * scale, color, targetVelocity, predator));
   }
 
   class DefaultArray2D {
@@ -85,8 +81,7 @@ function boidsMain() {
   }
 
   function calculateSingleBoid(boid, sliceArray) {
-    // get the list of all the nearby boids and store in nearBoids
-    const nearBoids = [];
+    const [processBoid, finish] = boid.makeUpdater();
 
     let { x, y } = boidSlice(boid);
 
@@ -99,14 +94,14 @@ function boidsMain() {
           if (b !== boid) {
             let dist = Vector2.dist(b.position, boid.position);
             if (dist < radius) {
-              nearBoids.push(b);
+              processBoid(b);
             }
           }
         }
       }
     }
 
-    return boid.calculate(nearBoids);
+    return finish();
   }
 
   function drawBoids(frameDuration, numPredators, withBoids) {
@@ -172,7 +167,7 @@ function boidsMain() {
         boid.update();
       }
 
-      numPredators = boids.filter((b) => b.predator).length;
+      numPredators = boids.filter(b => b.predator).length;
       updateGraph(boids.length - numPredators, numPredators);
     }
 
