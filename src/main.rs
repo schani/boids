@@ -1,6 +1,6 @@
 mod audio;
 
-use audio::{AudioControlMapper, AudioEngine};
+use audio::AudioEngine;
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::ScreenDescriptor;
 use rand::Rng;
@@ -54,8 +54,6 @@ const CAUSE_PREY_OVERCROWDING: usize = 5;
 const CAUSE_PREDATOR_STARVATION: usize = 6;
 const CAUSE_OLD_AGE: usize = 7;
 const CAUSE_PREY_COLOR_SHIFT: usize = 8;
-const AUDIO_CONTROL_WINDOW_SEC: f32 = 0.10;
-
 const FLAG_PREDATOR: u32 = 1 << 0;
 const FLAG_ALIVE: u32 = 1 << 1;
 
@@ -262,8 +260,6 @@ struct State {
     graph: GraphState,
     causes: CauseState,
     audio: Option<AudioEngine>,
-    audio_mapper: AudioControlMapper,
-    audio_last_tick: Instant,
     params_cpu: Params,
     ui: UiState,
     cursor_pos_px: Option<[f32; 2]>,
@@ -1004,12 +1000,6 @@ impl State {
             },
             causes: CauseState::default(),
             audio,
-            audio_mapper: AudioControlMapper::new(
-                AUDIO_CONTROL_WINDOW_SEC,
-                BOID_CAPACITY,
-                ((BOID_CAPACITY as f32) * 0.05).round() as u32,
-            ),
-            audio_last_tick: Instant::now(),
             params_cpu: params,
             ui: UiState {
                 egui_ctx,
@@ -1039,11 +1029,6 @@ impl State {
 
     fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
         let frame_start = Instant::now();
-        let now = Instant::now();
-        let audio_dt_sec = (now - self.audio_last_tick)
-            .as_secs_f32()
-            .clamp(1.0 / 500.0, 0.5);
-        self.audio_last_tick = now;
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -1100,11 +1085,11 @@ impl State {
                 .show(ctx, |ui| {
                     ui.label(format!("FPS: {:.1}", fps));
                     ui.label(format!(
-                        "Audio: {}",
+                        "Audio output: {}",
                         if audio_enabled {
-                            "On"
+                            "Ready"
                         } else {
-                            "Off (no output device)"
+                            "Unavailable"
                         }
                     ));
                     ui.separator();
@@ -1417,20 +1402,10 @@ impl State {
         let readback_ms = {
             let readback_start = Instant::now();
             if readback {
-                if let Some([prey_count, predator_count]) = self.read_species_counts() {
-                    self.audio_mapper
-                        .update_populations(prey_count, predator_count);
-                }
+                let _ = self.read_species_counts();
                 self.update_graph_vertices();
             }
-            let cause_counts = self.read_cause_counts();
-            if let Some(counts) = cause_counts {
-                if let Some(controls) = self.audio_mapper.ingest_events(counts, audio_dt_sec) {
-                    if let Some(audio) = &self.audio {
-                        audio.update_controls(controls);
-                    }
-                }
-            }
+            let _ = self.read_cause_counts();
             readback_start.elapsed().as_secs_f32() * 1000.0
         };
         self.graph.frame += 1;
